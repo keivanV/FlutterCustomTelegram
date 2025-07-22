@@ -1,0 +1,46 @@
+name: tg
+description: "A simple audio recording app."
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.8.1
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+  http: ^1.2.2
+  provider: ^6.1.2
+  flutter_secure_storage: ^9.2.2
+  animated_theme_switcher: ^2.0.10 
+  cached_network_image: ^3.3.1
+  web_socket_channel: ^3.0.1
+  permission_handler: ^11.3.1
+  animate_do: ^3.3.4
+  record: ^5.1.2
+  path_provider: ^2.1.4
+  audioplayers: ^6.1.0  # Downgrade to match voiceapp  # just_audio: ^0.10.4
+  shared_preferences: ^2.5.3
+  # audio_video_progress_bar: ^2.0.3
+  flutter_ffmpeg: ^0.4.2
+  flutter_sound: ^9.28.0
+  # just_audio_windows: ^0.2.0  # Add this line
+  # just_audio_media_kit: ^2.1.0
+  # assets_audio_player: ^3.1.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+dependency_overrides:
+  record_linux: null  
+
+flutter:
+  uses-material-design: true
+  # Uncomment and add Vazir font if available
+  # fonts:
+  #   - family: Vazir
+  #     fonts:
+  #       - asset: fonts/Vazir.ttf
