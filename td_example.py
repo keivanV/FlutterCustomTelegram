@@ -7,6 +7,8 @@ import glob
 import time
 import urllib.parse
 import base64
+from pydub import AudioSegment
+
 from ctypes import CDLL, CFUNCTYPE, c_char_p, c_double, c_int
 from ctypes.util import find_library
 from typing import Any, Dict, Optional, List
@@ -33,7 +35,6 @@ class TdExample:
         self._setup_logging()
         self.client_id = self._td_create_client_id()
         logger.info(f"Created client with ID: {self.client_id} for session: {session_path}")
-        self.clean_old_voice_files()
 
     def _load_library(self) -> None:
         """Load TDLib library."""
@@ -155,7 +156,6 @@ class TdExample:
 
     async def check_session(self) -> Dict[str, Any]:
         """Check the authentication state of the session."""
-        self.clean_old_voice_files()
         max_retries = 3
         for attempt in range(max_retries):
             logger.info(f"Checking session, attempt {attempt + 1}")
@@ -493,17 +493,21 @@ class TdExample:
                     waveform = chat["waveform"]
                     if isinstance(waveform, str) and waveform:
                         try:
-                            waveform = [b / 255.0 for b in base64.b64decode(waveform)]
+                            waveform_data = [b / 255.0 for b in base64.b64decode(waveform)]
+                            logger.info(f"Decoded waveform for chat {chat['id']}: {waveform_data[:10]}...")
                         except Exception as e:
                             logger.error(f"Failed to decode waveform for chat {chat['id']}: {e}")
-                            waveform = []
+                            waveform_data = [0.1] * 60  # Default waveform
+                    else:
+                        logger.warning(f"No waveform data for chat {chat['id']}, using default")
+                        waveform_data = [0.1] * 60  # Default waveform
                     if voice_url:
                         chat["last_message"]["content"] = {
                             "@type": "messageVoiceNote",
                             "text": "[Voice Message]",
                             "voice_note": {
                                 "duration": chat["last_message"]["content"]["voice_note"]["duration"],
-                                "waveform": waveform,
+                                "waveform": waveform_data,
                                 "voice": {
                                     **chat["last_message"]["content"]["voice_note"]["voice"],
                                     "remote": {
@@ -553,21 +557,39 @@ class TdExample:
                             if msg["content"]["@type"] == "messageText":
                                 new_messages.append({
                                     "id": msg["id"],
-                                    "content": msg["content"],
+                                    "content": msg["content"]["text"]["text"],
+                                    "isVoice": False,
+                                    "voiceUrl": None,
+                                    "duration": 0,
                                     "is_outgoing": msg["is_outgoing"],
                                     "date": msg["date"],
                                 })
                             elif msg["content"]["@type"] == "messageVoiceNote":
                                 voice_file_id = msg["content"]["voice_note"]["voice"]["id"]
                                 waveform = msg["content"]["voice_note"].get("waveform", "")
+                                duration = msg["content"]["voice_note"].get("duration", 0)
                                 new_file_ids.append((voice_file_id, "voice"))
+                                waveform_data = []
+                                if isinstance(waveform, str) and waveform:
+                                    try:
+                                        waveform_data = [b / 255.0 for b in base64.b64decode(waveform)]
+                                        logger.info(f"Decoded waveform for message {msg['id']}: {waveform_data[:10]}...")
+                                    except Exception as e:
+                                        logger.error(f"Failed to decode waveform for message {msg['id']}: {e}")
+                                        waveform_data = [0.1] * 60  # Default waveform
+                                else:
+                                    logger.warning(f"No waveform data for message {msg['id']}, using default")
+                                    waveform_data = [0.1] * 60  # Default waveform
                                 new_messages.append({
                                     "id": msg["id"],
-                                    "content": msg["content"],
+                                    "content": "[Voice Message]",
+                                    "isVoice": True,
+                                    "voiceUrl": None,
+                                    "duration": duration,
                                     "is_outgoing": msg["is_outgoing"],
                                     "date": msg["date"],
                                     "voice_file_id": voice_file_id,
-                                    "waveform": waveform,
+                                    "waveformData": waveform_data,
                                 })
                     messages.extend(new_messages)
                     file_ids.extend(new_file_ids)
@@ -591,53 +613,12 @@ class TdExample:
             file_urls = {}
 
         for msg in messages:
-            if msg["content"]["@type"] == "messageVoiceNote":
+            if msg["isVoice"]:
                 voice_file_id = msg["voice_file_id"]
                 voice_url = file_urls.get(voice_file_id) if voice_file_id else None
-                waveform = msg["waveform"]
-                if isinstance(waveform, str) and waveform:
-                    try:
-                        waveform = [b / 255.0 for b in base64.b64decode(waveform)]
-                    except Exception as e:
-                        logger.error(f"Failed to decode waveform for message {msg['id']}: {e}")
-                        waveform = []
-                else:
-                    waveform = []
-                session_id = hashlib.md5(phone_number.encode()).hexdigest() if phone_number else ""
-                if voice_url:
-                    msg["content"] = {
-                        "@type": "messageVoiceNote",
-                        "text": "[Voice Message]",
-                        "voice_note": {
-                            "duration": msg["content"]["voice_note"]["duration"],
-                            "waveform": waveform,
-                            "voice": {
-                                **msg["content"]["voice_note"]["voice"],
-                                "remote": {
-                                    **msg["content"]["voice_note"]["voice"].get("remote", {}),
-                                    "url": voice_url
-                                }
-                            }
-                        }
-                    }
-                else:
-                    msg["content"] = {
-                        "@type": "messageVoiceNote",
-                        "text": "[Voice Message Pending]",
-                        "voice_note": {
-                            "duration": msg["content"]["voice_note"]["duration"],
-                            "waveform": waveform,
-                            "voice": {
-                                **msg["content"]["voice_note"]["voice"],
-                                "remote": {
-                                    **msg["content"]["voice_note"]["voice"].get("remote", {}),
-                                    "url": ""
-                                }
-                            }
-                        }
-                    }
+                msg["voiceUrl"] = voice_url
+                logger.info(f"Message {msg['id']} waveformData: {msg['waveformData'][:10]}...")
                 del msg["voice_file_id"]
-                del msg["waveform"]
 
         logger.info(f"Returning {len(messages)} messages for chat_id: {chat_id}")
         return messages
@@ -660,7 +641,10 @@ class TdExample:
                     self.sent_message_ids.add(message_id)
                     return {
                         "id": event["id"],
-                        "content": event["content"],
+                        "content": event["content"]["text"]["text"],
+                        "isVoice": False,
+                        "voiceUrl": None,
+                        "duration": 0,
                         "is_outgoing": event["is_outgoing"],
                         "date": event["date"],
                     }
@@ -690,18 +674,36 @@ class TdExample:
             voice_dir = os.path.join(self.session_path, "voice")
             os.makedirs(voice_dir, exist_ok=True)
 
-            oga_path = voice_path.replace(".wav", ".oga")
+            # Trim the initial 100ms of the voice file to remove noise
+            trimmed_wav_path = voice_path.replace(".wav", "_trimmed.wav")
             try:
-                convert_oga_to_wav(voice_path, oga_path, reverse=True)
-                logger.info(f"Converted {voice_path} to {oga_path}")
+                audio = AudioSegment.from_file(voice_path, format="wav")
+                audio = audio[100:]  # Trim first 100ms
+                audio = audio.set_channels(1).set_sample_width(2).set_frame_rate(16000)
+                audio.export(trimmed_wav_path, format="wav")
+                logger.info(f"Trimmed {voice_path} to {trimmed_wav_path}")
+            except Exception as e:
+                logger.error(f"Failed to trim WAV file: {e}")
+                return {"status": "error", "message": f"Failed to trim WAV file: {str(e)}"}
+
+            oga_path = trimmed_wav_path.replace(".wav", ".oga")
+            try:
+                convert_oga_to_wav(trimmed_wav_path, oga_path, reverse=True)
+                logger.info(f"Converted {trimmed_wav_path} to {oga_path}")
             except Exception as e:
                 logger.error(f"Failed to convert WAV to OGG: {e}")
                 return {"status": "error", "message": f"Failed to convert WAV to OGG: {str(e)}"}
 
-            waveform = generate_waveform(voice_path)
+            waveform = generate_waveform(trimmed_wav_path)
             if not waveform:
-                logger.warning(f"Waveform generation failed for {voice_path}, using empty waveform")
-                waveform = []
+                logger.warning(f"Waveform generation failed for {trimmed_wav_path}, using default")
+                waveform = [0.1] * 60  # Default waveform
+            logger.info(f"Generated waveform for {trimmed_wav_path}: {waveform[:10]}...")
+
+            # Encode waveform for TDLib
+            waveform_encoded = base64.b64encode(
+                bytes([int(x * 31) for x in waveform])  # TDLib expects 5-bit values (0-31)
+            ).decode('utf-8')
 
             self.send({
                 "@type": "sendMessage",
@@ -712,9 +714,8 @@ class TdExample:
                         "@type": "inputFileLocal",
                         "path": oga_path
                     },
-                    "duration": duration,
-                    "waveform": base64.b64encode(
-                        bytes([int(x * 255) for x in waveform])).decode('utf-8')
+                    "duration": max(0, duration - 1),  # Adjust duration for trimmed portion
+                    "waveform": waveform_encoded
                 }
             })
 
@@ -735,6 +736,18 @@ class TdExample:
                             return {"status": "error", "message": f"Unexpected content type: {event['content']['@type']}"}
                         voice_note = event["content"]["voice_note"]
                         file_id = voice_note["voice"]["id"]
+                        event_waveform = voice_note.get("waveform", "")
+                        event_waveform_data = []
+                        if isinstance(event_waveform, str) and event_waveform:
+                            try:
+                                event_waveform_data = [b / 31.0 for b in base64.b64decode(event_waveform)]
+                                logger.info(f"TDLib returned waveform for message {message_id}: {event_waveform_data[:10]}...")
+                            except Exception as e:
+                                logger.error(f"Failed to decode TDLib waveform for message {message_id}: {e}")
+                                event_waveform_data = waveform  # Fallback to generated waveform
+                        else:
+                            logger.warning(f"No waveform returned by TDLib for message {message_id}, using generated")
+                            event_waveform_data = waveform
                         logger.info(f"Message sent with ID: {message_id}, file_id: {file_id}")
                 elif event["@type"] == "updateFile" and file_id and event["file"]["id"] == file_id:
                     local = event["file"].get("local", {})
@@ -758,70 +771,26 @@ class TdExample:
                     logger.error(f"Failed to get file URL for file_id: {file_id}")
                     return {
                         "id": message_id,
-                        "content": {
-                            "@type": "messageVoiceNote",
-                            "text": "[Voice Message Pending]",
-                            "voice_note": {
-                                "duration": duration,
-                                "waveform": waveform,
-                                "voice": {
-                                    "@type": "file",
-                                    "id": file_id,
-                                    "size": os.path.getsize(oga_path) if os.path.exists(oga_path) else 0,
-                                    "expected_size": os.path.getsize(oga_path) if os.path.exists(oga_path) else 0,
-                                    "local": {
-                                        "@type": "localFile",
-                                        "path": oga_path,
-                                        "can_be_downloaded": True,
-                                        "can_be_deleted": True,
-                                        "is_downloading_active": False,
-                                        "is_downloading_completed": True,
-                                        "downloaded_size": os.path.getsize(oga_path) if os.path.exists(oga_path) else 0
-                                    },
-                                    "remote": {
-                                        "@type": "remoteFile",
-                                        "url": ""
-                                    }
-                                }
-                            }
-                        },
+                        "content": "[Voice Message Pending]",
+                        "isVoice": True,
+                        "voiceUrl": "",
+                        "duration": max(0, duration - 1),
                         "is_outgoing": True,
                         "date": int(time.time()),
+                        "waveformData": waveform
                     }
 
                 self.file_url_cache[file_id] = file_url
 
                 response = {
                     "id": message_id,
-                    "content": {
-                        "@type": "messageVoiceNote",
-                        "text": "[Voice Message]",
-                        "voice_note": {
-                            "duration": duration,
-                            "waveform": waveform,
-                            "voice": {
-                                "@type": "file",
-                                "id": file_id,
-                                "size": os.path.getsize(oga_path) if os.path.exists(oga_path) else 0,
-                                "expected_size": os.path.getsize(oga_path) if os.path.exists(oga_path) else 0,
-                                "local": {
-                                    "@type": "localFile",
-                                    "path": oga_path,
-                                    "can_be_downloaded": True,
-                                    "can_be_deleted": True,
-                                    "is_downloading_active": False,
-                                    "is_downloading_completed": True,
-                                    "downloaded_size": os.path.getsize(oga_path) if os.path.exists(oga_path) else 0
-                                },
-                                "remote": {
-                                    "@type": "remoteFile",
-                                    "url": file_url
-                                }
-                            }
-                        }
-                    },
+                    "content": "[Voice Message]",
+                    "isVoice": True,
+                    "voiceUrl": file_url,
+                    "duration": max(0, duration - 1),
                     "is_outgoing": True,
                     "date": int(time.time()),
+                    "waveformData": event_waveform_data
                 }
                 logger.info(f"Generated response for message {message_id}: {response}")
                 return response
@@ -829,35 +798,13 @@ class TdExample:
                 logger.error("File upload not completed or file_id not received")
                 return {
                     "id": message_id,
-                    "content": {
-                        "@type": "messageVoiceNote",
-                        "text": "[Voice Message Pending]",
-                        "voice_note": {
-                            "duration": duration,
-                            "waveform": waveform,
-                            "voice": {
-                                "@type": "file",
-                                "id": file_id if file_id else 0,
-                                "size": os.path.getsize(oga_path) if os.path.exists(oga_path) else 0,
-                                "expected_size": os.path.getsize(oga_path) if os.path.exists(oga_path) else 0,
-                                "local": {
-                                    "@type": "localFile",
-                                    "path": oga_path,
-                                    "can_be_downloaded": True,
-                                    "can_be_deleted": True,
-                                    "is_downloading_active": False,
-                                    "is_downloading_completed": True,
-                                    "downloaded_size": os.path.getsize(oga_path) if os.path.exists(oga_path) else 0
-                                },
-                                "remote": {
-                                    "@type": "remoteFile",
-                                    "url": ""
-                                }
-                            }
-                        }
-                    },
+                    "content": "[Voice Message Pending]",
+                    "isVoice": True,
+                    "voiceUrl": "",
+                    "duration": max(0, duration - 1),
                     "is_outgoing": True,
                     "date": int(time.time()),
+                    "waveformData": waveform
                 }
 
         except Exception as e:

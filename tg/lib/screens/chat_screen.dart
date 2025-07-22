@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:intl/intl.dart';
 import '../models/chat.dart';
 import '../widgets/chat_tile.dart';
 import 'conversation_screen.dart';
@@ -21,9 +22,11 @@ class _ChatScreenState extends State<ChatScreen> {
   bool isLoadingMore = false;
   String? errorMessage;
   int offset = 0;
-  final int limit = 20; // Load 20 chats at a time
+  final int limit = 20;
   final ScrollController _scrollController = ScrollController();
+  bool isDarkMode = true;
   SharedPreferences? _prefs;
+  final TextEditingController _searchController = TextEditingController();
 
   @override
   void initState() {
@@ -34,8 +37,8 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _initPrefsAndLoadChats() async {
     _prefs = await SharedPreferences.getInstance();
+    isDarkMode = _prefs?.getBool('isDarkMode') ?? true;
     await _loadCachedChats();
-    // Only fetch from server if cache is empty or outdated
     if (chats.isEmpty || _isCacheOutdated()) {
       await _fetchChats(background: true);
     } else {
@@ -49,7 +52,6 @@ class _ChatScreenState extends State<ChatScreen> {
     final lastFetchTime =
         _prefs?.getInt('last_fetch_time_${widget.phoneNumber}') ?? 0;
     final currentTime = DateTime.now().millisecondsSinceEpoch;
-    // Consider cache outdated if older than 10 minutes
     return (currentTime - lastFetchTime) > 10 * 60 * 1000;
   }
 
@@ -66,7 +68,6 @@ class _ChatScreenState extends State<ChatScreen> {
         final cachedChatList = jsonList
             .map((json) => Chat.fromJson(json))
             .toList();
-        // Remove duplicates based on chat ID
         final uniqueChats = <int, Chat>{};
         for (var chat in cachedChatList) {
           uniqueChats[chat.id] = chat;
@@ -74,21 +75,19 @@ class _ChatScreenState extends State<ChatScreen> {
         if (mounted) {
           setState(() {
             chats = uniqueChats.values.toList();
-            // Sort chats by order (descending)
             chats.sort(
               (a, b) => int.parse(
                 b.order ?? '0',
               ).compareTo(int.parse(a.order ?? '0')),
             );
-            isLoading =
-                false; // Set isLoading to false immediately after loading cache
+            isLoading = false;
           });
         }
       } catch (e) {
         print('Error loading cached chats: $e');
         if (mounted) {
           setState(() {
-            errorMessage = 'خطا در بارگذاری چت‌های ذخیره‌شده: $e';
+            errorMessage = 'خطا در بارگذاری چت‌های ذخیره‌شده';
             isLoading = false;
           });
         }
@@ -137,7 +136,6 @@ class _ChatScreenState extends State<ChatScreen> {
             .toList();
         if (mounted) {
           setState(() {
-            // Remove duplicates by merging with existing chats
             final uniqueChats = <int, Chat>{};
             for (var chat in chats) {
               uniqueChats[chat.id] = chat;
@@ -146,7 +144,6 @@ class _ChatScreenState extends State<ChatScreen> {
               uniqueChats[chat.id] = chat;
             }
             chats = uniqueChats.values.toList();
-            // Sort chats by order (descending)
             chats.sort(
               (a, b) => int.parse(
                 b.order ?? '0',
@@ -157,7 +154,6 @@ class _ChatScreenState extends State<ChatScreen> {
               isLoading = false;
               isLoadingMore = false;
             }
-            // Cache the chats
             _prefs?.setString(
               'cached_chats_${widget.phoneNumber}',
               jsonEncode(chats.map((chat) => chat.toJson()).toList()),
@@ -171,7 +167,7 @@ class _ChatScreenState extends State<ChatScreen> {
       } else {
         if (mounted && !background) {
           setState(() {
-            errorMessage = 'خطا در دریافت چت‌ها: ${response.statusCode}';
+            errorMessage = 'خطا در دریافت چت‌ها';
             isLoading = false;
             isLoadingMore = false;
           });
@@ -181,7 +177,7 @@ class _ChatScreenState extends State<ChatScreen> {
       print('Error fetching chats: $e\n$stackTrace');
       if (mounted && !background) {
         setState(() {
-          errorMessage = 'خطای شبکه در دریافت چت‌ها: $e';
+          errorMessage = 'خطای شبکه در دریافت چت‌ها';
           isLoading = false;
           isLoadingMore = false;
         });
@@ -197,19 +193,64 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  void _toggleTheme() {
+    setState(() {
+      isDarkMode = !isDarkMode;
+      _prefs?.setBool('isDarkMode', isDarkMode);
+    });
+  }
+
   @override
   void dispose() {
     _scrollController.dispose();
+    _searchController.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    final Color backgroundColor = isDarkMode
+        ? const Color(0xFF17212B)
+        : const Color(0xFFEFEFEF);
+    final Color appBarColor = isDarkMode
+        ? const Color(0xFF2A3A4A)
+        : const Color(0xFF5181B8);
+    final Color textColor = isDarkMode ? Colors.white : Colors.black87;
+    final Color errorColor = isDarkMode ? Colors.red[300]! : Colors.redAccent;
+
     return Scaffold(
+      backgroundColor: backgroundColor,
       appBar: AppBar(
-        title: const Text('چت‌ها'),
-        backgroundColor: Colors.blueGrey[800],
+        title: const Text(
+          'تلگرام',
+          style: TextStyle(
+            fontFamily: 'Vazir',
+            fontSize: 18,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        backgroundColor: appBarColor,
+        elevation: 0,
+        leading: IconButton(
+          icon: const Icon(Icons.menu, color: Colors.white),
+          onPressed: () {
+            Scaffold.of(context).openDrawer();
+          },
+        ),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.search, color: Colors.white),
+            onPressed: () {
+              showSearch(context: context, delegate: ChatSearchDelegate(chats));
+            },
+          ),
+          IconButton(
+            icon: Icon(
+              isDarkMode ? Icons.wb_sunny : Icons.nightlight_round,
+              color: Colors.white,
+            ),
+            onPressed: _toggleTheme,
+          ),
           IconButton(
             icon: const Icon(Icons.refresh, color: Colors.white),
             onPressed: () {
@@ -219,14 +260,54 @@ class _ChatScreenState extends State<ChatScreen> {
           ),
         ],
       ),
+      drawer: Drawer(
+        child: ListView(
+          padding: EdgeInsets.zero,
+          children: [
+            DrawerHeader(
+              decoration: BoxDecoration(color: appBarColor),
+              child: const Text(
+                'منو',
+                style: TextStyle(
+                  fontFamily: 'Vazir',
+                  color: Colors.white,
+                  fontSize: 24,
+                ),
+              ),
+            ),
+            ListTile(
+              leading: const Icon(Icons.settings),
+              title: const Text(
+                'تنظیمات',
+                style: TextStyle(fontFamily: 'Vazir'),
+              ),
+              onTap: () {
+                Navigator.pop(context);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.group_add),
+              title: const Text(
+                'گروه جدید',
+                style: TextStyle(fontFamily: 'Vazir'),
+              ),
+              onTap: () {
+                Navigator.pop(context);
+              },
+            ),
+          ],
+        ),
+      ),
       body: isLoading && chats.isEmpty
-          ? const Center(
+          ? Center(
               child: CircularProgressIndicator(
-                color: Colors.blueAccent,
-                strokeWidth: 2.0,
+                color: appBarColor,
+                strokeWidth: 3.0,
               ),
             )
           : RefreshIndicator(
+              color: appBarColor,
+              backgroundColor: backgroundColor,
               onRefresh: () async {
                 offset = 0;
                 await _fetchChats();
@@ -234,25 +315,47 @@ class _ChatScreenState extends State<ChatScreen> {
               child: Column(
                 children: [
                   if (errorMessage != null)
-                    Padding(
-                      padding: const EdgeInsets.all(8.0),
-                      child: Text(
-                        errorMessage!,
-                        style: const TextStyle(
-                          color: Colors.redAccent,
-                          fontSize: 14,
-                        ),
-                        textAlign: TextAlign.center,
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 8,
+                      ),
+                      color: errorColor.withOpacity(0.2),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Text(
+                            errorMessage!,
+                            style: TextStyle(
+                              color: errorColor,
+                              fontSize: 14,
+                              fontFamily: 'Vazir',
+                            ),
+                          ),
+                          TextButton(
+                            onPressed: () => _fetchChats(),
+                            child: Text(
+                              'تلاش مجدد',
+                              style: TextStyle(
+                                color: isDarkMode
+                                    ? Colors.blue[300]
+                                    : Colors.blue[600],
+                                fontFamily: 'Vazir',
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                   Expanded(
                     child: chats.isEmpty && !isLoading
-                        ? const Center(
+                        ? Center(
                             child: Text(
                               'هیچ چتی موجود نیست',
                               style: TextStyle(
-                                color: Colors.grey,
+                                color: textColor.withOpacity(0.6),
                                 fontSize: 16,
+                                fontFamily: 'Vazir',
                               ),
                             ),
                           )
@@ -261,36 +364,49 @@ class _ChatScreenState extends State<ChatScreen> {
                             itemCount: chats.length + (isLoadingMore ? 1 : 0),
                             itemBuilder: (context, index) {
                               if (index == chats.length && isLoadingMore) {
-                                return const Center(
+                                return Center(
                                   child: Padding(
-                                    padding: EdgeInsets.all(8.0),
+                                    padding: const EdgeInsets.all(8.0),
                                     child: CircularProgressIndicator(
-                                      color: Colors.blueAccent,
-                                      strokeWidth: 2.0,
+                                      color: appBarColor,
+                                      strokeWidth: 3.0,
                                     ),
                                   ),
                                 );
                               }
                               final chat = chats[index];
-                              return ChatTile(
-                                chat: chat,
-                                onTap: () {
-                                  Navigator.push(
-                                    context,
-                                    MaterialPageRoute(
-                                      builder: (context) => ConversationScreen(
-                                        chatId: chat.id,
-                                        chatTitle: chat.id == 777000
-                                            ? 'اعلان‌های تلگرام'
-                                            : chat.title,
-                                        phoneNumber: widget.phoneNumber,
-                                      ),
+                              return AnimatedOpacity(
+                                opacity: 1.0,
+                                duration: const Duration(milliseconds: 300),
+                                child: Material(
+                                  color: Colors.transparent,
+                                  child: InkWell(
+                                    onTap: () {
+                                      Navigator.push(
+                                        context,
+                                        MaterialPageRoute(
+                                          builder: (context) =>
+                                              ConversationScreen(
+                                                chatId: chat.id,
+                                                chatTitle: chat.id == 777000
+                                                    ? 'اعلان‌های تلگرام'
+                                                    : chat.title,
+                                                phoneNumber: widget.phoneNumber,
+                                              ),
+                                        ),
+                                      ).then((_) {
+                                        _loadCachedChats();
+                                      });
+                                    },
+                                    hoverColor: isDarkMode
+                                        ? Colors.white.withOpacity(0.1)
+                                        : Colors.black.withOpacity(0.05),
+                                    child: ChatTile(
+                                      chat: chat,
+                                      isDarkMode: isDarkMode,
                                     ),
-                                  ).then((_) {
-                                    // Reload cached chats when returning
-                                    _loadCachedChats();
-                                  });
-                                },
+                                  ),
+                                ),
                               );
                             },
                           ),
@@ -298,6 +414,68 @@ class _ChatScreenState extends State<ChatScreen> {
                 ],
               ),
             ),
+    );
+  }
+}
+
+class ChatSearchDelegate extends SearchDelegate {
+  final List<Chat> chats;
+
+  ChatSearchDelegate(this.chats);
+
+  @override
+  List<Widget> buildActions(BuildContext context) {
+    return [
+      IconButton(
+        icon: const Icon(Icons.clear),
+        onPressed: () {
+          query = '';
+        },
+      ),
+    ];
+  }
+
+  @override
+  Widget buildLeading(BuildContext context) {
+    return IconButton(
+      icon: const Icon(Icons.arrow_back),
+      onPressed: () {
+        close(context, null);
+      },
+    );
+  }
+
+  @override
+  Widget buildResults(BuildContext context) {
+    final results = chats
+        .where((chat) => chat.title.toLowerCase().contains(query.toLowerCase()))
+        .toList();
+    return ListView.builder(
+      itemCount: results.length,
+      itemBuilder: (context, index) {
+        final chat = results[index];
+        return ChatTile(
+          chat: chat,
+          isDarkMode: Theme.of(context).brightness == Brightness.dark,
+        );
+      },
+    );
+  }
+
+  @override
+  Widget buildSuggestions(BuildContext context) {
+    final suggestions = chats
+        .where((chat) => chat.title.toLowerCase().contains(query.toLowerCase()))
+        .toList();
+    return ListView.builder(
+      itemCount: suggestions.length,
+      itemBuilder: (context, index) {
+        final chat = suggestions[index];
+        return ChatTile(
+          chat: chat,
+          isDarkMode: Theme.of(context).brightness == Brightness.dark,
+        );
+      },
     );
   }
 }

@@ -4,17 +4,19 @@ from pydub import AudioSegment
 
 logger = logging.getLogger(__name__)
 
-def generate_waveform(file_path: str, num_samples: int = 60) -> list:
-    """Generate waveform data from an audio file."""
+def generate_waveform(file_path: str, num_samples: int = 60, trim_ms: int = 100) -> list:
+    """Generate waveform data from an audio file, trimming the initial segment to remove noise."""
     try:
         audio = AudioSegment.from_file(file_path, format="wav")
         audio = audio.set_channels(1).set_frame_rate(16000)
+        # Trim the first `trim_ms` milliseconds to remove initial noise
+        audio = audio[trim_ms:]
         samples = np.array(audio.get_array_of_samples())
         samples = samples.astype(np.float32) / np.max(np.abs(samples), initial=1)
         step = max(1, len(samples) // num_samples)
         waveform = [float(np.max(np.abs(samples[i:i + step]))) for i in range(0, len(samples), step)]
         waveform = waveform[:num_samples] + [0.0] * (num_samples - len(waveform))
-        logger.info(f"Generated waveform with {len(waveform)} samples")
+        logger.info(f"Generated waveform with {len(waveform)} samples after trimming {trim_ms}ms")
         return waveform
     except Exception as e:
         logger.error(f"Failed to generate waveform for {file_path}: {e}")

@@ -5,7 +5,7 @@ class Chat {
   final DateTime? lastMessageDate;
   final int unreadCount;
   final String? profilePhotoUrl;
-  final String? order; // Added order property
+  final String? order;
 
   Chat({
     required this.id,
@@ -45,7 +45,7 @@ class Chat {
       lastMessageDate: lastMessageDate,
       unreadCount: json['unread_count'] ?? 0,
       profilePhotoUrl: json['profile_photo_url'],
-      order: json['order']?.toString(), // Map order from JSON
+      order: json['order']?.toString(),
     );
   }
 
@@ -68,7 +68,7 @@ class Chat {
           : null,
       'unread_count': unreadCount,
       'profile_photo_url': profilePhotoUrl,
-      'order': order, // Include order in JSON
+      'order': order,
     };
   }
 }

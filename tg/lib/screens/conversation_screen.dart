@@ -8,98 +8,10 @@ import 'package:audioplayers/audioplayers.dart' as AudioPlayers;
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:record/record.dart' as Record;
-
-class Message {
-  final int id;
-  final String? content;
-  final String? voiceUrl;
-  final int? duration;
-  final bool isOutgoing;
-  final DateTime date;
-  final bool isVoice;
-  final List<double>? waveformData;
-
-  Message({
-    required this.id,
-    this.content,
-    this.voiceUrl,
-    this.duration,
-    required this.isOutgoing,
-    required this.date,
-    required this.isVoice,
-    this.waveformData,
-  });
-
-  factory Message.fromJson(Map<String, dynamic> json) {
-    if (json.containsKey('status') && json['status'] == 'error') {
-      return Message(
-        id: 0,
-        content: json['message'] ?? 'خطا در پردازش پیام',
-        isOutgoing: false,
-        date: DateTime.now(),
-        isVoice: false,
-      );
-    }
-
-    final contentType = json['content']?['@type'];
-    if (contentType == 'messageText') {
-      return Message(
-        id: json['id'] ?? 0,
-        content: json['content']['text']['text'] ?? 'بدون محتوا',
-        isOutgoing: json['is_outgoing'] ?? false,
-        date: json['date'] != null
-            ? DateTime.fromMillisecondsSinceEpoch(json['date'] * 1000)
-            : DateTime.now(),
-        isVoice: false,
-      );
-    } else if (json['content']?['@type'] == 'messageVoiceNote') {
-      final waveformData = json['content']['voice_note']['waveform'];
-      List<double>? parsedWaveformData;
-      if (waveformData is List) {
-        parsedWaveformData = waveformData.cast<double>();
-      } else if (waveformData is String && waveformData.isNotEmpty) {
-        try {
-          final decoded = base64Decode(waveformData);
-          parsedWaveformData = decoded.map((b) => b / 255.0).toList();
-        } catch (e) {
-          print('Error decoding waveform: $e');
-          parsedWaveformData = null;
-        }
-      } else {
-        parsedWaveformData = null;
-      }
-
-      String? voiceUrl =
-          json['content']['voice_note']['voice']['remote']['url'];
-      if (voiceUrl == null || voiceUrl.isEmpty) {
-        final remoteId = json['content']['voice_note']['voice']['remote']['id'];
-        if (remoteId != null) {
-          voiceUrl = 'http://192.168.1.3:8000/files/voice_${remoteId}.wav';
-        }
-      }
-
-      return Message(
-        id: json['id'] ?? 0,
-        content: '[پیام صوتی]',
-        voiceUrl: voiceUrl,
-        duration: json['content']['voice_note']['duration'],
-        isOutgoing: json['is_outgoing'] ?? false,
-        date: json['date'] != null
-            ? DateTime.fromMillisecondsSinceEpoch(json['date'] * 1000)
-            : DateTime.now(),
-        isVoice: true,
-        waveformData: parsedWaveformData,
-      );
-    }
-    return Message(
-      id: json['id'] ?? 0,
-      content: 'محتوای پشتیبانی‌نشده',
-      isOutgoing: json['is_outgoing'] ?? false,
-      date: DateTime.now(),
-      isVoice: false,
-    );
-  }
-}
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:intl/intl.dart' as intl;
+import 'package:intl/date_symbol_data_local.dart';
+import '../models/message.dart';
 
 class ConversationScreen extends StatefulWidget {
   final int chatId;
@@ -117,7 +29,8 @@ class ConversationScreen extends StatefulWidget {
   State<ConversationScreen> createState() => _ConversationScreenState();
 }
 
-class _ConversationScreenState extends State<ConversationScreen> {
+class _ConversationScreenState extends State<ConversationScreen>
+    with SingleTickerProviderStateMixin {
   List<Message> messages = [];
   String? errorMessage;
   bool isLoading = true;
@@ -143,18 +56,44 @@ class _ConversationScreenState extends State<ConversationScreen> {
   Timer? _recordingTimer;
   Timer? _pollTimer;
   bool _isAtBottom = true;
+  bool isDarkMode = true;
+  SharedPreferences? _prefs;
+  late AnimationController _animationController;
+  late Animation<double> _waveformAnimation;
 
   @override
   void initState() {
     super.initState();
-    _fetchMessages();
+    _initPrefs();
+    initializeDateFormatting('fa_IR', null).then((_) {
+      _fetchMessages();
+    });
     _scrollController.addListener(_onScroll);
     _setupAudioPlayer();
-    _pollTimer = Timer.periodic(Duration(seconds: 5), (_) {
+    _animationController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 500),
+    )..repeat(reverse: true);
+    _waveformAnimation = Tween<double>(begin: 0.9, end: 1.1).animate(
+      CurvedAnimation(
+        parent: _animationController,
+        curve: Curves.easeInOutSine,
+      ),
+    );
+    _pollTimer = Timer.periodic(const Duration(seconds: 5), (_) {
       if (_isAtBottom) {
         _fetchMessages();
       }
     });
+  }
+
+  Future<void> _initPrefs() async {
+    _prefs = await SharedPreferences.getInstance();
+    if (mounted) {
+      setState(() {
+        isDarkMode = _prefs?.getBool('isDarkMode') ?? true;
+      });
+    }
   }
 
   void _setupAudioPlayer() {
@@ -170,6 +109,9 @@ class _ConversationScreenState extends State<ConversationScreen> {
             _isAudioLoading = false;
             _audioPosition = Duration.zero;
             _currentPlayingUrl = null;
+            _animationController.reset();
+          } else if (state == AudioPlayers.PlayerState.playing) {
+            _animationController.forward();
           }
         });
       }
@@ -233,15 +175,32 @@ class _ConversationScreenState extends State<ConversationScreen> {
 
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
+        if (data['messages'] == null) {
+          print('No messages found in response');
+          setState(() {
+            isLoading = false;
+            isLoadingMore = false;
+            errorMessage = 'هیچ پیامی دریافت نشد';
+          });
+          return;
+        }
+
         final newMessages = (data['messages'] as List<dynamic>)
-            .map((json) => Message.fromJson(json))
+            .map((json) {
+              try {
+                return Message.fromJson(json);
+              } catch (e) {
+                print('Error parsing message JSON: $json\nError: $e');
+                return null;
+              }
+            })
+            .where((msg) => msg != null)
+            .cast<Message>()
             .toList();
 
         if (mounted) {
           setState(() {
             final existingMessageIds = {for (var msg in messages) msg.id: msg};
-
-            // فقط پیام‌های جدید یا پیام‌های به‌روزرسانی‌شده را اضافه می‌کنیم
             for (var message in newMessages) {
               if (!existingMessageIds.containsKey(message.id)) {
                 if (fromMessageId != null) {
@@ -252,14 +211,11 @@ class _ConversationScreenState extends State<ConversationScreen> {
               } else if (message.isVoice &&
                   existingMessageIds[message.id]!.voiceUrl == null &&
                   message.voiceUrl != null) {
-                // به‌روزرسانی پیام صوتی که اکنون URL دارد
                 final index = messages.indexWhere((m) => m.id == message.id);
                 messages[index] = message;
               }
             }
-
             messages.sort((a, b) => a.date.compareTo(b.date));
-
             if (newMessages.isNotEmpty) {
               oldestMessageId = messages.first.id;
             }
@@ -280,7 +236,7 @@ class _ConversationScreenState extends State<ConversationScreen> {
       print('Error fetching messages: $e\n$stackTrace');
       if (mounted) {
         setState(() {
-          errorMessage = 'خطای شبکه در دریافت پیام‌ها: $e';
+          errorMessage = 'خطای شبکه در دریافت پیام‌ها';
           isLoading = false;
           isLoadingMore = false;
         });
@@ -294,6 +250,7 @@ class _ConversationScreenState extends State<ConversationScreen> {
         final tempDir = await getTemporaryDirectory();
         _recordedFilePath =
             '${tempDir.path}/voice_${DateTime.now().millisecondsSinceEpoch}.wav';
+        await Future.delayed(const Duration(milliseconds: 100));
         await _recorder.start(
           const Record.RecordConfig(
             encoder: Record.AudioEncoder.wav,
@@ -327,7 +284,7 @@ class _ConversationScreenState extends State<ConversationScreen> {
       if (mounted) {
         setState(() {
           _isRecording = false;
-          errorMessage = 'خطا در شروع ضبط: $e';
+          errorMessage = 'خطا در شروع ضبط';
         });
       }
     }
@@ -357,7 +314,7 @@ class _ConversationScreenState extends State<ConversationScreen> {
         setState(() {
           _isWaveformLoading = false;
           _isRecording = false;
-          errorMessage = 'خطا در توقف ضبط: $e';
+          errorMessage = 'خطا در توقف ضبط';
         });
       }
     } finally {
@@ -403,12 +360,18 @@ class _ConversationScreenState extends State<ConversationScreen> {
         final data = jsonDecode(responseBody);
         if (data['status'] == 'error') {
           if (mounted) {
-            setState(
-              () => errorMessage = 'خطا در ارسال پیام صوتی: ${data['message']}',
-            );
+            setState(() => errorMessage = 'خطا در ارسال پیام صوتی');
           }
           await file.delete();
           return;
+        }
+        if (data.containsKey('waveformData') && data['waveformData'] is List) {
+          _waveformData = List<double>.from(
+            data['waveformData'].map((x) => x.toDouble()),
+          );
+          print(
+            'Waveform data for sent message: ${_waveformData!.take(10).toList()}',
+          );
         }
         if (mounted) {
           setState(() {
@@ -417,21 +380,19 @@ class _ConversationScreenState extends State<ConversationScreen> {
             _waveformData = null;
             _isWaveformLoading = false;
           });
-          await Future.delayed(Duration(seconds: 1));
+          await Future.delayed(const Duration(seconds: 1));
           _fetchMessages();
         }
         await file.delete();
       } else {
         if (mounted) {
-          setState(
-            () => errorMessage = 'خطا در ارسال پیام صوتی: $responseBody',
-          );
+          setState(() => errorMessage = 'خطا در ارسال پیام صوتی');
         }
       }
     } catch (e) {
       print('Error sending voice message: $e');
       if (mounted) {
-        setState(() => errorMessage = 'خطای شبکه در ارسال پیام صوتی: $e');
+        setState(() => errorMessage = 'خطای شبکه در ارسال پیام صوتی');
       }
     }
   }
@@ -453,28 +414,24 @@ class _ConversationScreenState extends State<ConversationScreen> {
         final data = jsonDecode(response.body);
         if (data.containsKey('status') && data['status'] == 'error') {
           if (mounted) {
-            setState(
-              () => errorMessage = 'خطا در ارسال پیام: ${data['message']}',
-            );
+            setState(() => errorMessage = 'خطا در ارسال پیام');
           }
           return;
         }
         if (mounted) {
           setState(() => _messageController.clear());
-          await Future.delayed(Duration(seconds: 1));
+          await Future.delayed(const Duration(seconds: 1));
           _fetchMessages();
         }
       } else {
         if (mounted) {
-          setState(
-            () => errorMessage = 'خطا در ارسال پیام: ${response.statusCode}',
-          );
+          setState(() => errorMessage = 'خطا در ارسال پیام');
         }
       }
     } catch (e) {
       print('Error sending message: $e');
       if (mounted) {
-        setState(() => errorMessage = 'خطای شبکه در ارسال پیام: $e');
+        setState(() => errorMessage = 'خطای شبکه در ارسال پیام');
       }
     }
   }
@@ -499,12 +456,6 @@ class _ConversationScreenState extends State<ConversationScreen> {
         throw Exception(
           'Cannot access audio file: HTTP ${response.statusCode}',
         );
-      }
-
-      final contentType = response.headers['content-type'];
-      if (contentType != 'audio/wav') {
-        print('Unexpected Content-Type: $contentType');
-        throw Exception('Unsupported Content-Type: $contentType');
       }
 
       await _audioPlayer.stop();
@@ -545,7 +496,7 @@ class _ConversationScreenState extends State<ConversationScreen> {
         setState(() {
           _isAudioLoading = false;
           _isPlaying = false;
-          errorMessage = 'خطا در پخش پیام صوتی: $e';
+          errorMessage = 'خطا در پخش پیام صوتی';
         });
       }
     }
@@ -564,8 +515,28 @@ class _ConversationScreenState extends State<ConversationScreen> {
     } catch (e) {
       print('Error stopping audio: $e');
       if (mounted) {
-        setState(() => errorMessage = 'خطا در توقف پخش: $e');
+        setState(() => errorMessage = 'خطا در توقف پخش');
       }
+    }
+  }
+
+  void _toggleTheme() {
+    setState(() {
+      isDarkMode = !isDarkMode;
+      _prefs?.setBool('isDarkMode', isDarkMode);
+    });
+  }
+
+  String _formatTimestamp(DateTime date) {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final messageDate = DateTime(date.year, date.month, date.day);
+    if (messageDate == today) {
+      return intl.DateFormat('HH:mm').format(date);
+    } else if (date.year == now.year) {
+      return intl.DateFormat('dd MMM', 'fa_IR').format(date);
+    } else {
+      return intl.DateFormat('dd MMM yyyy', 'fa_IR').format(date);
     }
   }
 
@@ -580,53 +551,153 @@ class _ConversationScreenState extends State<ConversationScreen> {
     _positionSubscription?.cancel();
     _durationSubscription?.cancel();
     _recordingTimer?.cancel();
+    _animationController.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    final Color backgroundColor = isDarkMode
+        ? const Color(0xFF17212B)
+        : const Color(0xFFEFEFEF);
+    final Color appBarColor = isDarkMode
+        ? const Color(0xFF2A3A4A)
+        : const Color(0xFF5181B8);
+    final Color textColor = isDarkMode ? Colors.white : Colors.black87;
+    final Color errorColor = isDarkMode ? Colors.red[300]! : Colors.redAccent;
+    final Color outgoingBubbleColor = isDarkMode
+        ? const Color(0xFF005F4B)
+        : const Color(0xFFDCF8C6);
+    final Color incomingBubbleColor = isDarkMode
+        ? const Color(0xFF2A3A4A)
+        : const Color(0xFFFFFFFF);
+
     return Scaffold(
-      appBar: AppBar(title: Text(widget.chatTitle)),
+      backgroundColor: backgroundColor,
+      appBar: AppBar(
+        title: Text(
+          widget.chatTitle,
+          style: const TextStyle(
+            fontFamily: 'Vazir',
+            fontSize: 18,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        backgroundColor: appBarColor,
+        elevation: 0,
+        actions: [
+          IconButton(
+            icon: Icon(
+              isDarkMode ? Icons.wb_sunny : Icons.nightlight_round,
+              color: Colors.white,
+            ),
+            onPressed: _toggleTheme,
+          ),
+        ],
+      ),
       body: Column(
         children: [
+          if (errorMessage != null)
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              color: errorColor.withOpacity(0.2),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Text(
+                    errorMessage!,
+                    style: TextStyle(
+                      color: errorColor,
+                      fontSize: 14,
+                      fontFamily: 'Vazir',
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: () => _fetchMessages(),
+                    child: Text(
+                      'تلاش مجدد',
+                      style: TextStyle(
+                        color: isDarkMode ? Colors.blue[300] : Colors.blue[600],
+                        fontFamily: 'Vazir',
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
           Expanded(
             child: isLoading
-                ? const Center(child: CircularProgressIndicator())
+                ? Center(
+                    child: CircularProgressIndicator(
+                      color: appBarColor,
+                      strokeWidth: 3.0,
+                    ),
+                  )
                 : messages.isEmpty
-                ? const Center(child: Text('هیچ پیامی موجود نیست'))
+                ? Center(
+                    child: Text(
+                      'هیچ پیامی موجود نیست',
+                      style: TextStyle(
+                        color: textColor.withOpacity(0.6),
+                        fontSize: 16,
+                        fontFamily: 'Vazir',
+                      ),
+                    ),
+                  )
                 : ListView.builder(
                     controller: _scrollController,
                     reverse: true,
                     itemCount: messages.length + (isLoadingMore ? 1 : 0),
                     itemBuilder: (context, index) {
                       if (index == messages.length) {
-                        return const Center(child: CircularProgressIndicator());
+                        return Center(
+                          child: Padding(
+                            padding: const EdgeInsets.all(8.0),
+                            child: CircularProgressIndicator(
+                              color: appBarColor,
+                              strokeWidth: 3.0,
+                            ),
+                          ),
+                        );
                       }
                       final message = messages[messages.length - 1 - index];
-                      return ListTile(
-                        title: Align(
+                      return Padding(
+                        padding: const EdgeInsets.symmetric(
+                          vertical: 4.0,
+                          horizontal: 8.0,
+                        ),
+                        child: Align(
                           alignment: message.isOutgoing
                               ? Alignment.centerRight
                               : Alignment.centerLeft,
-                          child: Container(
-                            padding: const EdgeInsets.all(8.0),
-                            margin: const EdgeInsets.symmetric(
-                              vertical: 4.0,
-                              horizontal: 8.0,
-                            ),
-                            decoration: BoxDecoration(
-                              color: message.isOutgoing
-                                  ? Colors.blue[100]
-                                  : Colors.grey[200],
-                              borderRadius: BorderRadius.circular(8.0),
-                            ),
-                            child: message.isVoice
-                                ? Column(
-                                    crossAxisAlignment: message.isOutgoing
-                                        ? CrossAxisAlignment.end
-                                        : CrossAxisAlignment.start,
-                                    children: [
-                                      Row(
+                          child: Column(
+                            crossAxisAlignment: message.isOutgoing
+                                ? CrossAxisAlignment.end
+                                : CrossAxisAlignment.start,
+                            children: [
+                              Container(
+                                constraints: BoxConstraints(
+                                  maxWidth:
+                                      MediaQuery.of(context).size.width * 0.7,
+                                ),
+                                padding: const EdgeInsets.all(10.0),
+                                decoration: BoxDecoration(
+                                  color: message.isOutgoing
+                                      ? outgoingBubbleColor
+                                      : incomingBubbleColor,
+                                  borderRadius: BorderRadius.circular(12.0),
+                                  boxShadow: [
+                                    BoxShadow(
+                                      color: Colors.black.withOpacity(
+                                        isDarkMode ? 0.3 : 0.1,
+                                      ),
+                                      blurRadius: 4,
+                                      offset: const Offset(0, 2),
+                                    ),
+                                  ],
+                                ),
+                                child: message.isVoice
+                                    ? Row(
                                         mainAxisSize: MainAxisSize.min,
                                         children: [
                                           IconButton(
@@ -636,6 +707,10 @@ class _ConversationScreenState extends State<ConversationScreen> {
                                                           message.voiceUrl
                                                   ? Icons.pause
                                                   : Icons.play_arrow,
+                                              color: isDarkMode
+                                                  ? Colors.white
+                                                  : Colors.black87,
+                                              size: 28,
                                             ),
                                             onPressed:
                                                 _isAudioLoading &&
@@ -661,92 +736,154 @@ class _ConversationScreenState extends State<ConversationScreen> {
                                                     }
                                                   },
                                           ),
-                                          Text(
-                                            '${message.duration ?? 0} ثانیه',
+                                          const SizedBox(width: 8),
+                                          Column(
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
+                                            children: [
+                                              Text(
+                                                '${message.duration ?? 0} ثانیه',
+                                                style: TextStyle(
+                                                  fontFamily: 'Vazir',
+                                                  fontSize: 12,
+                                                  color: textColor,
+                                                ),
+                                              ),
+                                              if (_isWaveformLoading &&
+                                                  message.isOutgoing &&
+                                                  message.voiceUrl == null)
+                                                const SizedBox(
+                                                  width: 150,
+                                                  height: 20,
+                                                  child:
+                                                      LinearProgressIndicator(),
+                                                ),
+                                              if (message.waveformData !=
+                                                      null &&
+                                                  (!_isWaveformLoading ||
+                                                      message.voiceUrl != null))
+                                                SizedBox(
+                                                  height: 24,
+                                                  width: 150,
+                                                  child: AnimatedBuilder(
+                                                    animation:
+                                                        _waveformAnimation,
+                                                    builder: (context, child) {
+                                                      return CustomPaint(
+                                                        painter: WaveformPainter(
+                                                          data: message
+                                                              .waveformData!,
+                                                          isPlaying:
+                                                              _isPlaying &&
+                                                              _currentPlayingUrl ==
+                                                                  message
+                                                                      .voiceUrl,
+                                                          progress:
+                                                              _audioDuration
+                                                                      .inMilliseconds >
+                                                                  0
+                                                              ? _audioPosition
+                                                                        .inMilliseconds /
+                                                                    _audioDuration
+                                                                        .inMilliseconds
+                                                              : 0.0,
+                                                          isDarkMode:
+                                                              isDarkMode,
+                                                          animationValue:
+                                                              _waveformAnimation
+                                                                  .value,
+                                                        ),
+                                                      );
+                                                    },
+                                                  ),
+                                                ),
+                                              if (_isPlaying &&
+                                                  _currentPlayingUrl ==
+                                                      message.voiceUrl)
+                                                Text(
+                                                  '${_audioPosition.inSeconds} / ${_audioDuration.inSeconds} ثانیه',
+                                                  style: TextStyle(
+                                                    fontFamily: 'Vazir',
+                                                    fontSize: 10,
+                                                    color: textColor,
+                                                  ),
+                                                ),
+                                            ],
                                           ),
                                         ],
+                                      )
+                                    : Text(
+                                        message.content ?? '',
+                                        style: TextStyle(
+                                          fontFamily: 'Vazir',
+                                          fontSize: 16,
+                                          color: textColor,
+                                        ),
                                       ),
-                                      if (_isWaveformLoading &&
-                                          message.isOutgoing &&
-                                          message.voiceUrl == null)
-                                        const SizedBox(
-                                          height: 20,
-                                          child: LinearProgressIndicator(),
-                                        ),
-                                      if (message.waveformData != null &&
-                                          (!_isWaveformLoading ||
-                                              message.voiceUrl != null))
-                                        SizedBox(
-                                          height: 40,
-                                          width: 100,
-                                          child: CustomPaint(
-                                            painter: WaveformPainter(
-                                              data: message.waveformData!,
-                                              isPlaying:
-                                                  _isPlaying &&
-                                                  _currentPlayingUrl ==
-                                                      message.voiceUrl,
-                                              progress:
-                                                  _audioDuration
-                                                          .inMilliseconds >
-                                                      0
-                                                  ? _audioPosition
-                                                            .inMilliseconds /
-                                                        _audioDuration
-                                                            .inMilliseconds
-                                                  : 0.0,
-                                            ),
-                                          ),
-                                        ),
-                                      if (_isPlaying &&
-                                          _currentPlayingUrl ==
-                                              message.voiceUrl)
-                                        Text(
-                                          '${_audioPosition.inSeconds} / ${_audioDuration.inSeconds} ثانیه',
-                                          style: const TextStyle(fontSize: 10),
-                                        ),
-                                    ],
-                                  )
-                                : Text(message.content ?? ''),
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                _formatTimestamp(message.date),
+                                style: TextStyle(
+                                  fontFamily: 'Vazir',
+                                  fontSize: 12,
+                                  color: textColor.withOpacity(0.6),
+                                ),
+                              ),
+                            ],
                           ),
-                        ),
-                        subtitle: Text(
-                          message.date.toString().substring(0, 16),
-                          style: const TextStyle(fontSize: 10),
                         ),
                       );
                     },
                   ),
           ),
-          if (errorMessage != null)
-            Padding(
-              padding: const EdgeInsets.all(8.0),
-              child: Text(
-                errorMessage!,
-                style: const TextStyle(color: Colors.red),
-              ),
-            ),
-          Padding(
-            padding: const EdgeInsets.all(8.0),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 8.0),
+            color: isDarkMode
+                ? const Color(0xFF2A3A4A)
+                : const Color(0xFFF5F5F5),
             child: Row(
               children: [
                 Expanded(
-                  child: TextField(
-                    controller: _messageController,
-                    decoration: const InputDecoration(
-                      hintText: 'پیام خود را بنویسید...',
-                      border: OutlineInputBorder(),
-                    ),
+                  child: Directionality(
                     textDirection: TextDirection.rtl,
+                    child: TextField(
+                      controller: _messageController,
+                      decoration: InputDecoration(
+                        hintText: 'پیام خود را بنویسید...',
+                        hintStyle: TextStyle(
+                          fontFamily: 'Vazir',
+                          color: textColor.withOpacity(0.6),
+                        ),
+                        filled: true,
+                        fillColor: isDarkMode
+                            ? const Color(0xFF3B4A5A)
+                            : Colors.white,
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(20.0),
+                          borderSide: BorderSide.none,
+                        ),
+                      ),
+                      style: TextStyle(fontFamily: 'Vazir', color: textColor),
+                    ),
                   ),
                 ),
-                IconButton(
-                  icon: const Icon(Icons.send),
-                  onPressed: _sendMessage,
-                ),
-                IconButton(
-                  icon: Icon(_isRecording ? Icons.stop : Icons.mic),
+                const SizedBox(width: 8),
+                FloatingActionButton(
+                  mini: true,
+                  backgroundColor: appBarColor,
                   onPressed: _isRecording ? _stopRecording : _startRecording,
+                  child: Icon(
+                    _isRecording ? Icons.stop : Icons.mic,
+                    color: Colors.white,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                FloatingActionButton(
+                  mini: true,
+                  backgroundColor: appBarColor,
+                  onPressed: _sendMessage,
+                  child: const Icon(Icons.send, color: Colors.white),
                 ),
               ],
             ),
@@ -761,65 +898,98 @@ class WaveformPainter extends CustomPainter {
   final List<double> data;
   final bool isPlaying;
   final double progress;
+  final bool isDarkMode;
+  final double animationValue;
 
   WaveformPainter({
     required this.data,
     required this.isPlaying,
     required this.progress,
+    required this.isDarkMode,
+    required this.animationValue,
   });
 
   @override
   void paint(Canvas canvas, Size size) {
-    final barWidth = 1.0;
-    final barSpacing = 0.5;
+    final barWidth = 1.5; // میله‌های باریک‌تر مثل تلگرام
+    final barSpacing = 1.0;
     final totalBarWidth = barWidth + barSpacing;
     final barCount = (size.width / totalBarWidth).floor();
     final height = size.height;
 
+    // نرمال‌سازی داده‌ها
+    final normalizedData = _normalizeData(data, barCount);
+
+    // رنگ‌های پس‌زمینه و پیش‌زمینه
     final bgPaint = Paint()
-      ..color = Colors.grey[600]!
+      ..color = isDarkMode ? Colors.grey[600]! : Colors.grey[400]!
       ..style = PaintingStyle.fill;
 
     final fgPaint = Paint()
       ..style = PaintingStyle.fill
       ..shader = LinearGradient(
         colors: isPlaying
-            ? [Colors.cyanAccent, Colors.blueAccent]
-            : [Colors.grey[400]!, Colors.grey[600]!],
+            ? [Colors.blue[400]!, Colors.cyan[300]!]
+            : isDarkMode
+            ? [Colors.grey[500]!, Colors.grey[700]!]
+            : [Colors.blue[200]!, Colors.blue[300]!],
         begin: Alignment.topCenter,
         end: Alignment.bottomCenter,
-      ).createShader(Rect.fromLTWH(0, 0, size.width, size.height));
-
-    final strokePaint = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 0.3
-      ..color = isPlaying ? Colors.cyanAccent.withOpacity(0.8) : Colors.black45;
-
-    final dataStep = data.length / barCount;
+      ).createShader(Rect.fromLTWH(0, 0, size.width, height));
 
     for (int i = 0; i < barCount; i++) {
       final x = i * totalBarWidth;
-      final dataIndex = (i * dataStep).floor().clamp(0, data.length - 1);
-      final amplitude = (data[dataIndex].abs() * (height / 2)) * 0.7;
-      final isInProgress = isPlaying && (x / size.width) <= progress;
+      final dataIndex = (i * (normalizedData.length / barCount)).floor().clamp(
+        0,
+        normalizedData.length - 1,
+      );
+      var amplitude =
+          normalizedData[dataIndex] *
+          (height / 2) *
+          0.6; // ارتفاع کوتاه‌تر مثل تلگرام
 
-      final paint = isInProgress ? fgPaint : bgPaint;
+      // اعمال انیمیشن مقیاس
+      if (isPlaying && (x / size.width) <= progress) {
+        amplitude *= animationValue;
+      }
 
+      // حداقل ارتفاع میله
+      amplitude = amplitude < 1.0 ? 1.0 : amplitude;
+
+      // رسم میله
+      final paint = (isPlaying && (x / size.width) <= progress)
+          ? fgPaint
+          : bgPaint;
       canvas.drawRRect(
         RRect.fromRectAndRadius(
           Rect.fromLTWH(x, height / 2 - amplitude, barWidth, amplitude * 2),
-          const Radius.circular(1.0),
+          const Radius.circular(0.5),
         ),
         paint,
       );
-      canvas.drawRRect(
-        RRect.fromRectAndRadius(
-          Rect.fromLTWH(x, height / 2 - amplitude, barWidth, amplitude * 2),
-          const Radius.circular(1.0),
-        ),
-        strokePaint,
-      );
     }
+  }
+
+  List<double> _normalizeData(List<double> data, int barCount) {
+    if (data.isEmpty) return List.filled(barCount, 0.1);
+
+    // حذف مقادیر غیرمعتبر و نرمال‌سازی
+    final filteredData = data.where((x) => x.isFinite && x >= 0).toList();
+    if (filteredData.isEmpty) return List.filled(barCount, 0.1);
+
+    final maxAmplitude = filteredData.reduce((a, b) => a > b ? a : b);
+    final normalized = filteredData
+        .map((x) => maxAmplitude > 0 ? x / maxAmplitude : 0.1)
+        .toList();
+
+    // تنظیم تعداد میله‌ها
+    final step = normalized.length / barCount;
+    final result = <double>[];
+    for (var i = 0; i < barCount; i++) {
+      final index = (i * step).floor().clamp(0, normalized.length - 1);
+      result.add(normalized[index]);
+    }
+    return result;
   }
 
   @override
@@ -827,6 +997,8 @@ class WaveformPainter extends CustomPainter {
     final oldPainter = oldDelegate as WaveformPainter;
     return oldPainter.data != data ||
         oldPainter.isPlaying != isPlaying ||
-        oldPainter.progress != progress;
+        oldPainter.progress != progress ||
+        oldPainter.isDarkMode != isDarkMode ||
+        oldPainter.animationValue != animationValue;
   }
 }
