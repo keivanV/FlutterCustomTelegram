@@ -30,6 +30,7 @@ class TdExample:
         self.sent_message_ids = set()
         os.makedirs(self.session_path, exist_ok=True)
         os.makedirs(os.path.join(self.session_path, "voice"), exist_ok=True)
+        os.makedirs(os.path.join(self.session_path, "profile_photos"), exist_ok=True)
         self._load_library()
         self._setup_functions()
         self._setup_logging()
@@ -88,19 +89,20 @@ class TdExample:
         self._td_set_log_message_callback(2, on_log_message_callback)
         self.execute({"@type": "setLogVerbosityLevel", "new_verbosity_level": verbosity_level})
 
-    def clean_old_voice_files(self) -> None:
-        """Remove voice files older than 24 hours."""
-        voice_dir = os.path.join(self.session_path, "voice")
-        if os.path.exists(voice_dir):
-            for file_path in glob.glob(os.path.join(voice_dir, "*.wav")) + glob.glob(os.path.join(voice_dir, "*.oga")):
-                try:
-                    if os.path.isfile(file_path):
-                        file_age = time.time() - os.path.getmtime(file_path)
-                        if file_age > 24 * 3600:
-                            os.remove(file_path)
-                            logger.info(f"Deleted old voice file: {file_path}")
-                except Exception as e:
-                    logger.warning(f"Failed to delete old voice file {file_path}: {e}")
+    def clean_old_files(self) -> None:
+        """Remove voice and profile photo files older than 24 hours."""
+        for dir_name in ["voice", "profile_photos"]:
+            dir_path = os.path.join(self.session_path, dir_name)
+            if os.path.exists(dir_path):
+                for file_path in glob.glob(os.path.join(dir_path, "*")):
+                    try:
+                        if os.path.isfile(file_path):
+                            file_age = time.time() - os.path.getmtime(file_path)
+                            if file_age > 24 * 3600:
+                                os.remove(file_path)
+                                logger.info(f"Deleted old file: {file_path}")
+                    except Exception as e:
+                        logger.warning(f"Failed to delete old file {file_path}: {e}")
 
     def execute(self, query: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Execute a TDLib query synchronously."""
@@ -283,17 +285,18 @@ class TdExample:
         logger.warning("No authorization state received after retries")
         return {"status": "unknown"}
 
-    async def download_file(self, file_id: int, phone_number: str, retries: int = 5, timeout: float = 15.0) -> Optional[str]:
+    async def download_file(self, file_id: int, phone_number: str, file_type: str = "voice", retries: int = 5, timeout: float = 15.0) -> Optional[str]:
         """Download a file and return its URL."""
         if file_id in self.file_url_cache:
-            logger.info(f"Returning cached URL for file_id: {file_id}")
+            logger.info(f"Returning cached URL for file_id: {file_id} ({file_type})")
             return self.file_url_cache[file_id] if self.file_url_cache[file_id] else None
         
         session_id = hashlib.md5(phone_number.encode()).hexdigest()
-        voice_dir = os.path.join(self.session_path, "voice")
-        os.makedirs(voice_dir, exist_ok=True)
+        target_dir = os.path.join(self.session_path, "voice" if file_type == "voice" else "profile_photos")
+        os.makedirs(target_dir, exist_ok=True)
+        
         for attempt in range(retries):
-            logger.info(f"Attempt {attempt + 1} to download file_id: {file_id} for phone: {phone_number}")
+            logger.info(f"Attempt {attempt + 1} to download file_id: {file_id} ({file_type}) for phone: {phone_number}")
             self.send({"@type": "getFile", "file_id": file_id})
             download_initiated = False
             async for event in self._receive_events(timeout=timeout):
@@ -304,25 +307,33 @@ class TdExample:
                             logger.warning(f"File path {local['path']} does not exist, skipping")
                             self.file_url_cache[file_id] = None
                             return None
-                        oga_path = local["path"]
-                        file_name = os.path.basename(oga_path)
-                        wav_file_name = file_name.replace(".oga", ".wav") if file_name.endswith(".oga") else f"voice_{file_id}.wav"
-                        wav_path = os.path.join(voice_dir, wav_file_name)
+                        file_path = local["path"]
+                        file_name = os.path.basename(file_path)
+                        if file_type == "voice":
+                            file_name = file_name.replace(".oga", ".wav") if file_name.endswith(".oga") else f"voice_{file_id}.wav"
+                            target_path = os.path.join(target_dir, file_name)
+                            try:
+                                convert_oga_to_wav(file_path, target_path)
+                            except Exception as e:
+                                logger.error(f"Conversion failed for file_id {file_id}: {e}")
+                                self.file_url_cache[file_id] = None
+                                return None
+                        else:
+                            target_path = os.path.join(target_dir, f"photo_{file_id}_{file_name}")
+                            try:
+                                os.rename(file_path, target_path)
+                            except Exception as e:
+                                logger.error(f"Failed to move profile photo for file_id {file_id}: {e}")
+                                self.file_url_cache[file_id] = None
+                                return None
                         
-                        try:
-                            convert_oga_to_wav(oga_path, wav_path)
-                        except Exception as e:
-                            logger.error(f"Conversion failed for file_id {file_id}: {e}")
-                            self.file_url_cache[file_id] = None
-                            return None
-                        
-                        file_url = f"{BACKEND_HOST}/files/{session_id}/voice/{urllib.parse.quote(wav_file_name)}?phone_number={urllib.parse.quote(phone_number)}"
+                        file_url = f"{BACKEND_HOST}/files/{session_id}/{file_type}/{urllib.parse.quote(os.path.basename(target_path))}?phone_number={urllib.parse.quote(phone_number)}"
                         self.file_url_cache[file_id] = file_url
-                        logger.info(f"Successfully retrieved file URL for file_id: {file_id}: {file_url}")
+                        logger.info(f"Successfully retrieved file URL for file_id: {file_id} ({file_type}): {file_url}")
                         return file_url
                     elif not local.get("is_downloading_active", False) and not local.get("is_downloading_completed", False):
                         if not download_initiated:
-                            logger.info(f"Initiating download for file_id: {file_id} on attempt {attempt + 1}")
+                            logger.info(f"Initiating download for file_id: {file_id} ({file_type}) on attempt {attempt + 1}")
                             self.send({
                                 "@type": "downloadFile",
                                 "file_id": file_id,
@@ -333,9 +344,9 @@ class TdExample:
                             })
                             download_initiated = True
                     else:
-                        logger.debug(f"File_id: {file_id} still downloading or no path on attempt {attempt + 1}")
+                        logger.debug(f"File_id: {file_id} ({file_type}) still downloading or no path on attempt {attempt + 1}")
                 elif event["@type"] == "error" and event.get("code") == 404:
-                    logger.warning(f"File_id {file_id} not found, skipping")
+                    logger.warning(f"File_id {file_id} ({file_type}) not found, skipping")
                     self.file_url_cache[file_id] = None
                     return None
                 elif event["@type"] == "error":
@@ -343,7 +354,7 @@ class TdExample:
                     self.file_url_cache[file_id] = None
                     return None
             await asyncio.sleep(1.0)
-        logger.error(f"Failed to get valid URL for file_id: {file_id} after {retries} attempts")
+        logger.error(f"Failed to get valid URL for file_id: {file_id} ({file_type}) after {retries} attempts")
         self.file_url_cache[file_id] = None
         return None
 
@@ -356,7 +367,7 @@ class TdExample:
                 file_urls[file_id] = self.file_url_cache[file_id]
                 logger.info(f"Using cached URL for file_id: {file_id} ({file_type})")
             else:
-                tasks.append(self.download_file(file_id, phone_number))
+                tasks.append(self.download_file(file_id, phone_number, file_type))
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
         for (file_id, file_type), result in zip(file_ids, results):
@@ -409,6 +420,8 @@ class TdExample:
                     for chat_id in new_chat_ids:
                         if chat_id not in chat_ids:
                             chat_ids.append(chat_id)
+                            # Request chat details to ensure we have the latest profile photo
+                            self.send({"@type": "getChat", "chat_id": chat_id})
                     logger.info(f"Received {len(new_chat_ids)} chat IDs: {new_chat_ids}")
                 elif event["@type"] == "updateNewChat":
                     chat = event["chat"]
@@ -416,10 +429,12 @@ class TdExample:
                     last_message = chat.get("last_message")
                     voice_file_id = None
                     waveform = None
+                    profile_photo_id = None
                     if last_message and last_message["content"]["@type"] == "messageVoiceNote":
                         voice_file_id = last_message["content"]["voice_note"]["voice"]["id"]
                         waveform = last_message["content"]["voice_note"].get("waveform", "")
-
+                    if chat.get("photo"):
+                        profile_photo_id = chat["photo"].get("small", {}).get("id")
                     positions = chat.get("positions", [])
                     order = positions[0].get("order", "0") if positions else "0"
 
@@ -430,6 +445,7 @@ class TdExample:
                         "unread_count": chat.get("unread_count", 0),
                         "voice_file_id": voice_file_id,
                         "waveform": waveform,
+                        "profile_photo_id": profile_photo_id,
                         "order": order
                     }
                     logger.info(f"Updated/Added chat to cache: {chat_id}")
@@ -437,6 +453,8 @@ class TdExample:
                     chat_id = event["chat_id"]
                     if chat_id in self.chat_cache and chat_id not in chat_ids:
                         chat_ids.append(chat_id)
+                        # Request chat details to ensure we have the latest profile photo
+                        self.send({"@type": "getChat", "chat_id": chat_id})
                         logger.info(f"Chat {chat_id} added to list via updateChatAddedToList")
                 elif event["@type"] == "error":
                     logger.error(f"TDLib error in get_chats: {event}")
@@ -452,14 +470,17 @@ class TdExample:
                     last_message = event.get("last_message")
                     voice_file_id = None
                     waveform = None
+                    profile_photo_id = None
                     if last_message and last_message["content"]["@type"] == "messageVoiceNote":
                         voice_file_id = last_message["content"]["voice_note"]["voice"]["id"]
                         waveform = last_message["content"]["voice_note"].get("waveform", "")
+                    if event.get("photo"):
+                        profile_photo_id = event["photo"].get("small", {}).get("id")
 
                     positions = event.get("positions", [])
                     order = positions[0].get("order", "0") if positions else "0"
 
-                    if chat_id not in self.chat_cache or self.chat_cache[chat_id]["order"] != order:
+                    if chat_id not in self.chat_cache or self.chat_cache[chat_id]["order"] != order or self.chat_cache[chat_id]["profile_photo_id"] != profile_photo_id:
                         self.chat_cache[chat_id] = {
                             "id": chat_id,
                             "title": event.get("title", "Unknown Chat"),
@@ -467,6 +488,7 @@ class TdExample:
                             "unread_count": event.get("unread_count", 0),
                             "voice_file_id": voice_file_id,
                             "waveform": waveform,
+                            "profile_photo_id": profile_photo_id,
                             "order": order
                         }
                         logger.info(f"Updated/Fetched details for chat: {chat_id}")
@@ -480,6 +502,8 @@ class TdExample:
                 seen_chat_ids.add(chat_id)
                 if self.chat_cache[chat_id]["voice_file_id"]:
                     file_ids.append((self.chat_cache[chat_id]["voice_file_id"], "voice"))
+                if self.chat_cache[chat_id]["profile_photo_id"]:
+                    file_ids.append((self.chat_cache[chat_id]["profile_photo_id"], "profile_photo"))
 
         chats.sort(key=lambda x: int(x["order"] or "0"), reverse=True)
         chats = chats[offset:offset + limit]
@@ -522,8 +546,11 @@ class TdExample:
                             "@type": "messageText",
                             "text": {"@type": "formattedText", "text": "[Voice Message Unavailable]"}
                         }
-                    del chat["voice_file_id"]
-                    del chat["waveform"]
+                profile_photo_url = file_urls.get(chat["profile_photo_id"]) if chat["profile_photo_id"] else None
+                chat["profile_photo_url"] = profile_photo_url
+                del chat["voice_file_id"]
+                del chat["waveform"]
+                del chat["profile_photo_id"]
 
         logger.info(f"Returning {len(chats)} chats")
         return chats
@@ -766,7 +793,7 @@ class TdExample:
                 return {"status": "error", "message": "Failed to send voice message"}
 
             if file_id and file_uploaded:
-                file_url = await self.download_file(file_id, phone_number, retries=5, timeout=15.0)
+                file_url = await self.download_file(file_id, phone_number, file_type="voice", retries=5, timeout=15.0)
                 if not file_url:
                     logger.error(f"Failed to get file URL for file_id: {file_id}")
                     return {

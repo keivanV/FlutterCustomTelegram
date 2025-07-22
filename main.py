@@ -5,11 +5,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from models import AuthRequest, SessionRequest, MessageRequest, SendMessageRequest, SendVoiceMessageRequest, GetChatsRequest
 from td_example import TdExample
 from config import API_ID, API_HASH
-from typing import Dict  # اضافه کردن Dict از typing
+from typing import Dict
 import json
 import logging
 import hashlib
-import os , time
+import os, time
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -24,7 +24,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-clients: Dict[str, TdExample] = {}  # استفاده از Dict به جای dict
+clients: Dict[str, TdExample] = {}
 
 def get_session_path(phone_number: str) -> str:
     """Generate session path from phone number."""
@@ -184,46 +184,60 @@ async def send_voice_message(file: UploadFile = File(...), request: str = Form(.
         logger.error(f"Error processing send_voice_message: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
-@app.get("/files/{session_id}/voice/{file_name}")
-async def get_file(session_id: str, file_name: str, phone_number: str = Query(...)):
-    """Serve a voice file from the session's voice directory."""
-    logger.info(f"File request: session_id={session_id}, file_name={file_name}, phone_number={phone_number}")
+@app.get("/files/{session_id}/{file_type}/{file_name}")
+async def get_file(session_id: str, file_type: str, file_name: str, phone_number: str = Query(...)):
+    """Serve a file from the session's directory."""
+    logger.info(f"File request: session_id={session_id}, file_type={file_type}, file_name={file_name}, phone_number={phone_number}")
     expected_session_id = hashlib.md5(phone_number.encode()).hexdigest()
     if session_id != expected_session_id:
         logger.error(f"Session ID mismatch: {session_id} != {expected_session_id}")
         raise HTTPException(status_code=403, detail="Invalid session ID")
 
+    # Map profile_photo to profile_photos directory
+    valid_file_types = {"voice": "voice", "profile_photo": "profile_photos", "profile_photos": "profile_photos"}
+    if file_type not in valid_file_types:
+        logger.error(f"Invalid file type: {file_type}")
+        raise HTTPException(status_code=400, detail="Invalid file type")
+
     session_path = get_session_path(phone_number)
-    file_path = os.path.join(session_path, "voice", file_name)
+    file_path = os.path.join(session_path, valid_file_types[file_type], file_name)
     if not os.path.exists(file_path):
         logger.error(f"File not found: {file_path}")
         raise HTTPException(status_code=404, detail="File not found")
 
+    media_type = "audio/wav" if valid_file_types[file_type] == "voice" else "image/jpeg"
     return FileResponse(
         file_path,
-        media_type="audio/wav",
+        media_type=media_type,
         headers={"Content-Disposition": f"attachment; filename={file_name}"}
     )
 
-@app.head("/files/{session_id}/voice/{file_name}")
-async def head_file(session_id: str, file_name: str, phone_number: str = Query(...)):
-    """Handle HEAD request for a voice file."""
-    logger.info(f"HEAD request: session_id={session_id}, file_name={file_name}, phone_number={phone_number}")
+@app.head("/files/{session_id}/{file_type}/{file_name}")
+async def head_file(session_id: str, file_type: str, file_name: str, phone_number: str = Query(...)):
+    """Handle HEAD request for a file."""
+    logger.info(f"HEAD request: session_id={session_id}, file_type={file_type}, file_name={file_name}, phone_number={phone_number}")
     expected_session_id = hashlib.md5(phone_number.encode()).hexdigest()
     if session_id != expected_session_id:
         logger.error(f"Session ID mismatch: {session_id} != {expected_session_id}")
         raise HTTPException(status_code=403, detail="Invalid session ID")
 
+    # Map profile_photo to profile_photos directory
+    valid_file_types = {"voice": "voice", "profile_photo": "profile_photos", "profile_photos": "profile_photos"}
+    if file_type not in valid_file_types:
+        logger.error(f"Invalid file type: {file_type}")
+        raise HTTPException(status_code=400, detail="Invalid file type")
+
     session_path = get_session_path(phone_number)
-    file_path = os.path.join(session_path, "voice", file_name)
+    file_path = os.path.join(session_path, valid_file_types[file_type], file_name)
     if not os.path.exists(file_path):
         logger.error(f"File not found: {file_path}")
         raise HTTPException(status_code=404, detail="File not found")
 
     file_size = os.path.getsize(file_path)
+    media_type = "audio/wav" if valid_file_types[file_type] == "voice" else "image/jpeg"
     return Response(
         headers={
-            "Content-Type": "audio/wav",
+            "Content-Type": media_type,
             "Content-Length": str(file_size),
             "Content-Disposition": f"attachment; filename={file_name}"
         },
