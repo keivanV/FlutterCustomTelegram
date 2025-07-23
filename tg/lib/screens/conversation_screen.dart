@@ -12,6 +12,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:intl/intl.dart' as intl;
 import 'package:intl/date_symbol_data_local.dart';
 import '../models/message.dart';
+import 'auth_screen.dart';
 
 class ConversationScreen extends StatefulWidget {
   final int chatId;
@@ -33,6 +34,7 @@ class _ConversationScreenState extends State<ConversationScreen>
     with SingleTickerProviderStateMixin {
   List<Message> messages = [];
   String? errorMessage;
+  Color? _errorMessageColor;
   bool isLoading = true;
   bool isLoadingMore = false;
   int? oldestMessageId;
@@ -54,12 +56,28 @@ class _ConversationScreenState extends State<ConversationScreen>
   StreamSubscription<Duration>? _positionSubscription;
   StreamSubscription<Duration>? _durationSubscription;
   Timer? _recordingTimer;
-  Timer? _pollTimer;
   bool _isAtBottom = true;
   bool isDarkMode = true;
   SharedPreferences? _prefs;
   late AnimationController _animationController;
   late Animation<double> _waveformAnimation;
+  int _fetchRetryCount = 0;
+  int _sendMessageRetryCount = 0;
+  int _sendVoiceRetryCount = 0;
+  bool _isRetrying = false;
+  static const int maxRetries = 10;
+  static const List<int> retryDelaysInSeconds = [
+    3,
+    5,
+    15,
+    30,
+    60,
+    60,
+    60,
+    60,
+    60,
+    60,
+  ];
 
   @override
   void initState() {
@@ -80,11 +98,6 @@ class _ConversationScreenState extends State<ConversationScreen>
         curve: Curves.easeInOutSine,
       ),
     );
-    _pollTimer = Timer.periodic(const Duration(seconds: 5), (_) {
-      if (_isAtBottom) {
-        _fetchMessages();
-      }
-    });
   }
 
   Future<void> _initPrefs() async {
@@ -144,17 +157,59 @@ class _ConversationScreenState extends State<ConversationScreen>
     }
   }
 
+  Future<bool> _checkSession() async {
+    try {
+      setState(() {
+        errorMessage = 'در حال بررسی جلسه...';
+        _errorMessageColor = isDarkMode
+            ? Colors.yellow[300]
+            : Colors.yellowAccent;
+      });
+      final response = await http.post(
+        Uri.parse('http://192.168.1.3:8000/check_session'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'phone_number': widget.phoneNumber}),
+      );
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        bool isAuthenticated = data['is_authenticated'];
+        if (!isAuthenticated && mounted) {
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(
+              builder: (context) => AuthScreen(
+                phoneNumber: widget.phoneNumber,
+                initialState:
+                    data['auth_state'] == 'authorizationStateWaitPhoneNumber'
+                    ? 'wait_phone'
+                    : data['auth_state'],
+              ),
+            ),
+          );
+        }
+        print('Check session response: ${response.statusCode} $data');
+        return isAuthenticated;
+      }
+      return false;
+    } catch (e) {
+      print('Error checking session: $e');
+      return false;
+    }
+  }
+
   Future<void> _fetchMessages({int? fromMessageId, int limit = 50}) async {
-    if (isLoadingMore) return;
+    if (isLoadingMore || _isRetrying) return;
+    _isRetrying = true;
 
     try {
       setState(() {
         if (fromMessageId == null) {
           isLoading = true;
+          errorMessage = 'در حال اتصال به سرور';
+          _errorMessageColor = isDarkMode ? Colors.red[300] : Colors.redAccent;
         } else {
           isLoadingMore = true;
         }
-        errorMessage = null;
       });
 
       final response = await http.post(
@@ -176,13 +231,26 @@ class _ConversationScreenState extends State<ConversationScreen>
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
         if (data['messages'] == null) {
-          print('No messages found in response');
-          setState(() {
-            isLoading = false;
-            isLoadingMore = false;
-            errorMessage = 'هیچ پیامی دریافت نشد';
-          });
+          if (mounted) {
+            setState(() {
+              isLoading = false;
+              isLoadingMore = false;
+              errorMessage = 'هیچ پیامی دریافت نشد';
+              _errorMessageColor = isDarkMode
+                  ? Colors.red[300]
+                  : Colors.redAccent;
+              _fetchRetryCount = 0;
+            });
+          }
           return;
+        }
+
+        if (mounted) {
+          setState(() {
+            errorMessage = 'در حال دریافت پیام‌ها از سرور';
+            _errorMessageColor = Colors.green;
+          });
+          await Future.delayed(const Duration(seconds: 2));
         }
 
         final newMessages = (data['messages'] as List<dynamic>)
@@ -221,26 +289,423 @@ class _ConversationScreenState extends State<ConversationScreen>
             }
             isLoading = false;
             isLoadingMore = false;
+            errorMessage = null;
+            _errorMessageColor = null;
+            _fetchRetryCount = 0;
           });
+        }
+        print('Messages fetched successfully: ${newMessages.length} messages');
+        return;
+      } else if (response.statusCode == 401) {
+        bool isAuthenticated = await _checkSession();
+        if (!isAuthenticated) {
+          if (mounted) {
+            setState(() {
+              isLoading = false;
+              isLoadingMore = false;
+              errorMessage = 'نیاز به احراز هویت. لطفاً وارد شوید.';
+              _errorMessageColor = isDarkMode
+                  ? Colors.red[300]
+                  : Colors.redAccent;
+              _fetchRetryCount = 0;
+            });
+          }
+          return;
+        }
+        print('Retrying fetch messages after session check');
+        if (mounted) {
+          setState(() {
+            errorMessage = 'در حال تلاش مجدد...';
+            _errorMessageColor = isDarkMode
+                ? Colors.yellow[300]
+                : Colors.yellowAccent;
+          });
+          await Future.delayed(const Duration(seconds: 1));
+          await _fetchMessages(fromMessageId: fromMessageId, limit: limit);
+        }
+        return;
+      } else {
+        throw Exception(
+          'Backend responded with status: ${response.statusCode}',
+        );
+      }
+    } catch (e, stackTrace) {
+      print('Error fetching messages: $e\n$stackTrace');
+      if (_fetchRetryCount >= maxRetries - 1) {
+        if (mounted) {
+          setState(() {
+            errorMessage =
+                'خطا در اتصال به سرور پس از $maxRetries تلاش. لطفاً دوباره تلاش کنید.';
+            _errorMessageColor = isDarkMode
+                ? Colors.red[300]
+                : Colors.redAccent;
+            isLoading = false;
+            isLoadingMore = false;
+            _fetchRetryCount = 0;
+          });
+        }
+        return;
+      }
+
+      if (e.toString().contains('SocketException')) {
+        final delaySeconds =
+            retryDelaysInSeconds[_fetchRetryCount < retryDelaysInSeconds.length
+                ? _fetchRetryCount
+                : retryDelaysInSeconds.length - 1];
+        _fetchRetryCount++;
+        if (mounted) {
+          setState(() {
+            errorMessage =
+                'تلاش مجدد در حال اتصال به سرور، تلاش $_fetchRetryCount، پس از $delaySeconds ثانیه';
+            _errorMessageColor = isDarkMode
+                ? Colors.red[300]
+                : Colors.redAccent;
+          });
+          print('Waiting for $delaySeconds seconds before retry...');
+          await Future.delayed(Duration(seconds: delaySeconds));
+          print('Retry after $delaySeconds seconds completed.');
+          if (mounted) {
+            await _fetchMessages(fromMessageId: fromMessageId, limit: limit);
+          }
         }
       } else {
         if (mounted) {
           setState(() {
-            errorMessage = 'خطا در دریافت پیام‌ها: ${response.statusCode}';
-            isLoading = false;
-            isLoadingMore = false;
+            errorMessage = 'در حال تلاش مجدد...';
+            _errorMessageColor = isDarkMode
+                ? Colors.yellow[300]
+                : Colors.yellowAccent;
           });
+          print('Retrying fetch messages after non-network error');
+          await Future.delayed(const Duration(seconds: 1));
+          if (mounted) {
+            await _fetchMessages(fromMessageId: fromMessageId, limit: limit);
+          }
         }
       }
+    } finally {
+      _isRetrying = false;
+    }
+  }
+
+  Future<void> _sendMessage() async {
+    if (_messageController.text.trim().isEmpty || _isRetrying) return;
+    _isRetrying = true;
+
+    try {
+      setState(() {
+        errorMessage = 'در حال اتصال به سرور';
+        _errorMessageColor = isDarkMode ? Colors.red[300] : Colors.redAccent;
+      });
+
+      final response = await http.post(
+        Uri.parse('http://192.168.1.3:8000/send_message'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'phone_number': widget.phoneNumber,
+          'chat_id': widget.chatId,
+          'message': _messageController.text,
+        }),
+      );
+      print('Send message response: ${response.statusCode} ${response.body}');
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        if (data.containsKey('status') && data['status'] == 'error') {
+          if (mounted) {
+            setState(() {
+              errorMessage = 'خطا در ارسال پیام';
+              _errorMessageColor = isDarkMode
+                  ? Colors.red[300]
+                  : Colors.redAccent;
+              _sendMessageRetryCount = 0;
+            });
+          }
+          return;
+        }
+        if (mounted) {
+          setState(() {
+            errorMessage = 'در حال دریافت پیام‌ها از سرور';
+            _errorMessageColor = Colors.green;
+            _messageController.clear();
+            _sendMessageRetryCount = 0;
+          });
+          await Future.delayed(const Duration(seconds: 2));
+          _fetchMessages();
+          setState(() {
+            errorMessage = null;
+            _errorMessageColor = null;
+          });
+        }
+        return;
+      } else if (response.statusCode == 401) {
+        bool isAuthenticated = await _checkSession();
+        if (!isAuthenticated) {
+          if (mounted) {
+            setState(() {
+              errorMessage = 'نیاز به احراز هویت. لطفاً وارد شوید.';
+              _errorMessageColor = isDarkMode
+                  ? Colors.red[300]
+                  : Colors.redAccent;
+              _sendMessageRetryCount = 0;
+            });
+          }
+          return;
+        }
+        if (mounted) {
+          setState(() {
+            errorMessage = 'در حال تلاش مجدد...';
+            _errorMessageColor = isDarkMode
+                ? Colors.yellow[300]
+                : Colors.yellowAccent;
+          });
+          await Future.delayed(const Duration(seconds: 1));
+          await _sendMessage();
+        }
+        return;
+      } else {
+        throw Exception(
+          'Backend responded with status: ${response.statusCode}',
+        );
+      }
     } catch (e, stackTrace) {
-      print('Error fetching messages: $e\n$stackTrace');
+      print('Error sending message: $e\n$stackTrace');
+      if (_sendMessageRetryCount >= maxRetries - 1) {
+        if (mounted) {
+          setState(() {
+            errorMessage =
+                'خطا در ارسال پیام پس از $maxRetries تلاش. لطفاً دوباره تلاش کنید.';
+            _errorMessageColor = isDarkMode
+                ? Colors.red[300]
+                : Colors.redAccent;
+            _sendMessageRetryCount = 0;
+          });
+        }
+        return;
+      }
+
+      if (e.toString().contains('SocketException')) {
+        final delaySeconds =
+            retryDelaysInSeconds[_sendMessageRetryCount <
+                    retryDelaysInSeconds.length
+                ? _sendMessageRetryCount
+                : retryDelaysInSeconds.length - 1];
+        _sendMessageRetryCount++;
+        if (mounted) {
+          setState(() {
+            errorMessage =
+                'تلاش مجدد در حال اتصال به سرور، تلاش $_sendMessageRetryCount، پس از $delaySeconds ثانیه';
+            _errorMessageColor = isDarkMode
+                ? Colors.red[300]
+                : Colors.redAccent;
+          });
+          print('Waiting for $delaySeconds seconds before retry...');
+          await Future.delayed(Duration(seconds: delaySeconds));
+          print('Retry after $delaySeconds seconds completed.');
+          if (mounted) {
+            await _sendMessage();
+          }
+        }
+      } else {
+        if (mounted) {
+          setState(() {
+            errorMessage = 'در حال تلاش مجدد...';
+            _errorMessageColor = isDarkMode
+                ? Colors.yellow[300]
+                : Colors.yellowAccent;
+          });
+          print('Retrying fetch messages after non-network error');
+          await Future.delayed(const Duration(seconds: 1));
+          if (mounted) {
+            await _sendMessage();
+          }
+        }
+      }
+    } finally {
+      _isRetrying = false;
+    }
+  }
+
+  Future<void> _sendVoiceMessage() async {
+    if (_recordedFilePath == null ||
+        _recordingDuration == null ||
+        _isRetrying) {
       if (mounted) {
         setState(() {
-          errorMessage = 'خطای شبکه در دریافت پیام‌ها';
-          isLoading = false;
-          isLoadingMore = false;
+          errorMessage = 'هیچ ضبطی برای ارسال موجود نیست';
+          _errorMessageColor = isDarkMode ? Colors.red[300] : Colors.redAccent;
         });
       }
+      return;
+    }
+    _isRetrying = true;
+
+    try {
+      setState(() {
+        errorMessage = 'در حال اتصال به سرور';
+        _errorMessageColor = isDarkMode ? Colors.red[300] : Colors.redAccent;
+      });
+
+      final file = File(_recordedFilePath!);
+      if (!await file.exists()) {
+        if (mounted) {
+          setState(() {
+            errorMessage = 'فایل ضبط‌شده یافت نشد';
+            _errorMessageColor = isDarkMode
+                ? Colors.red[300]
+                : Colors.redAccent;
+          });
+        }
+        return;
+      }
+
+      var request = http.MultipartRequest(
+        'POST',
+        Uri.parse('http://192.168.1.3:8000/send_voice_message'),
+      );
+      request.fields['request'] = jsonEncode({
+        'phone_number': widget.phoneNumber,
+        'chat_id': widget.chatId,
+        'duration': _recordingDuration,
+      });
+      request.files.add(
+        await http.MultipartFile.fromPath(
+          'file',
+          _recordedFilePath!,
+          filename: 'voice.wav',
+        ),
+      );
+      final response = await request.send();
+      final responseBody = await response.stream.bytesToString();
+      print('Send voice response: ${response.statusCode} $responseBody');
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(responseBody);
+        if (data['status'] == 'error') {
+          if (mounted) {
+            setState(() {
+              errorMessage = 'خطا در ارسال پیام صوتی';
+              _errorMessageColor = isDarkMode
+                  ? Colors.red[300]
+                  : Colors.redAccent;
+              _sendVoiceRetryCount = 0;
+            });
+          }
+          await file.delete();
+          return;
+        }
+        if (data.containsKey('waveformData') && data['waveformData'] is List) {
+          _waveformData = List<double>.from(
+            data['waveformData'].map((x) => x.toDouble()),
+          );
+          print(
+            'Waveform data for sent message: ${_waveformData!.take(10).toList()}',
+          );
+        }
+        if (mounted) {
+          setState(() {
+            errorMessage = 'در حال دریافت پیام‌ها از سرور';
+            _errorMessageColor = Colors.green;
+            _recordedFilePath = null;
+            _recordingDuration = null;
+            _waveformData = null;
+            _isWaveformLoading = false;
+            _sendVoiceRetryCount = 0;
+          });
+          await Future.delayed(const Duration(seconds: 2));
+          _fetchMessages();
+          setState(() {
+            errorMessage = null;
+            _errorMessageColor = null;
+          });
+        }
+        await file.delete();
+        return;
+      } else if (response.statusCode == 401) {
+        bool isAuthenticated = await _checkSession();
+        if (!isAuthenticated) {
+          if (mounted) {
+            setState(() {
+              errorMessage = 'نیاز به احراز هویت. لطفاً وارد شوید.';
+              _errorMessageColor = isDarkMode
+                  ? Colors.red[300]
+                  : Colors.redAccent;
+              _sendVoiceRetryCount = 0;
+            });
+          }
+          return;
+        }
+        if (mounted) {
+          setState(() {
+            errorMessage = 'در حال تلاش مجدد...';
+            _errorMessageColor = isDarkMode
+                ? Colors.yellow[300]
+                : Colors.yellowAccent;
+          });
+          await Future.delayed(const Duration(seconds: 1));
+          await _sendVoiceMessage();
+        }
+        return;
+      } else {
+        throw Exception(
+          'Backend responded with status: ${response.statusCode}',
+        );
+      }
+    } catch (e, stackTrace) {
+      print('Error sending voice message: $e\n$stackTrace');
+      if (_sendVoiceRetryCount >= maxRetries - 1) {
+        if (mounted) {
+          setState(() {
+            errorMessage =
+                'خطا در ارسال پیام صوتی پس از $maxRetries تلاش. لطفاً دوباره تلاش کنید.';
+            _errorMessageColor = isDarkMode
+                ? Colors.red[300]
+                : Colors.redAccent;
+            _sendVoiceRetryCount = 0;
+          });
+        }
+        return;
+      }
+
+      if (e.toString().contains('SocketException')) {
+        final delaySeconds =
+            retryDelaysInSeconds[_sendVoiceRetryCount <
+                    retryDelaysInSeconds.length
+                ? _sendVoiceRetryCount
+                : retryDelaysInSeconds.length - 1];
+        _sendVoiceRetryCount++;
+        if (mounted) {
+          setState(() {
+            errorMessage =
+                'تلاش مجدد در حال اتصال به سرور، تلاش $_sendVoiceRetryCount، پس از $delaySeconds ثانیه';
+            _errorMessageColor = isDarkMode
+                ? Colors.red[300]
+                : Colors.redAccent;
+          });
+          print('Waiting for $delaySeconds seconds before retry...');
+          await Future.delayed(Duration(seconds: delaySeconds));
+          print('Retry after $delaySeconds seconds completed.');
+          if (mounted) {
+            await _sendVoiceMessage();
+          }
+        }
+      } else {
+        if (mounted) {
+          setState(() {
+            errorMessage = 'در حال تلاش مجدد...';
+            _errorMessageColor = isDarkMode
+                ? Colors.yellow[300]
+                : Colors.yellowAccent;
+          });
+          print('Retrying fetch messages after non-network error');
+          await Future.delayed(const Duration(seconds: 1));
+          if (mounted) {
+            await _sendVoiceMessage();
+          }
+        }
+      }
+    } finally {
+      _isRetrying = false;
     }
   }
 
@@ -266,6 +731,8 @@ class _ConversationScreenState extends State<ConversationScreen>
             _recordingDuration = 0;
             _waveformData = null;
             _isWaveformLoading = false;
+            errorMessage = null;
+            _errorMessageColor = null;
           });
           _recordingTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
             if (!_isRecording || !mounted) {
@@ -277,7 +744,12 @@ class _ConversationScreenState extends State<ConversationScreen>
         }
       } else {
         if (mounted) {
-          setState(() => errorMessage = 'نیاز به اجازه دسترسی به میکروفون');
+          setState(() {
+            errorMessage = 'نیاز به اجازه دسترسی به میکروفون';
+            _errorMessageColor = isDarkMode
+                ? Colors.red[300]
+                : Colors.redAccent;
+          });
         }
       }
     } catch (e) {
@@ -285,6 +757,7 @@ class _ConversationScreenState extends State<ConversationScreen>
         setState(() {
           _isRecording = false;
           errorMessage = 'خطا در شروع ضبط';
+          _errorMessageColor = isDarkMode ? Colors.red[300] : Colors.redAccent;
         });
       }
     }
@@ -306,6 +779,9 @@ class _ConversationScreenState extends State<ConversationScreen>
             _isWaveformLoading = false;
             _isRecording = false;
             errorMessage = 'فایل ضبط‌شده یافت نشد';
+            _errorMessageColor = isDarkMode
+                ? Colors.red[300]
+                : Colors.redAccent;
           });
         }
       }
@@ -315,6 +791,7 @@ class _ConversationScreenState extends State<ConversationScreen>
           _isWaveformLoading = false;
           _isRecording = false;
           errorMessage = 'خطا در توقف ضبط';
+          _errorMessageColor = isDarkMode ? Colors.red[300] : Colors.redAccent;
         });
       }
     } finally {
@@ -322,125 +799,14 @@ class _ConversationScreenState extends State<ConversationScreen>
     }
   }
 
-  Future<void> _sendVoiceMessage() async {
-    if (_recordedFilePath == null || _recordingDuration == null) {
-      if (mounted) {
-        setState(() => errorMessage = 'هیچ ضبطی برای ارسال موجود نیست');
-      }
-      return;
-    }
-    try {
-      final file = File(_recordedFilePath!);
-      if (!await file.exists()) {
-        if (mounted) {
-          setState(() => errorMessage = 'فایل ضبط‌شده یافت نشد');
-        }
-        return;
-      }
-      var request = http.MultipartRequest(
-        'POST',
-        Uri.parse('http://192.168.1.3:8000/send_voice_message'),
-      );
-      request.fields['request'] = jsonEncode({
-        'phone_number': widget.phoneNumber,
-        'chat_id': widget.chatId,
-        'duration': _recordingDuration,
-      });
-      request.files.add(
-        await http.MultipartFile.fromPath(
-          'file',
-          _recordedFilePath!,
-          filename: 'voice.wav',
-        ),
-      );
-      final response = await request.send();
-      final responseBody = await response.stream.bytesToString();
-      print('Send voice response: ${response.statusCode} $responseBody');
-      if (response.statusCode == 200) {
-        final data = jsonDecode(responseBody);
-        if (data['status'] == 'error') {
-          if (mounted) {
-            setState(() => errorMessage = 'خطا در ارسال پیام صوتی');
-          }
-          await file.delete();
-          return;
-        }
-        if (data.containsKey('waveformData') && data['waveformData'] is List) {
-          _waveformData = List<double>.from(
-            data['waveformData'].map((x) => x.toDouble()),
-          );
-          print(
-            'Waveform data for sent message: ${_waveformData!.take(10).toList()}',
-          );
-        }
-        if (mounted) {
-          setState(() {
-            _recordedFilePath = null;
-            _recordingDuration = null;
-            _waveformData = null;
-            _isWaveformLoading = false;
-          });
-          await Future.delayed(const Duration(seconds: 1));
-          _fetchMessages();
-        }
-        await file.delete();
-      } else {
-        if (mounted) {
-          setState(() => errorMessage = 'خطا در ارسال پیام صوتی');
-        }
-      }
-    } catch (e) {
-      print('Error sending voice message: $e');
-      if (mounted) {
-        setState(() => errorMessage = 'خطای شبکه در ارسال پیام صوتی');
-      }
-    }
-  }
-
-  Future<void> _sendMessage() async {
-    if (_messageController.text.trim().isEmpty) return;
-    try {
-      final response = await http.post(
-        Uri.parse('http://192.168.1.3:8000/send_message'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({
-          'phone_number': widget.phoneNumber,
-          'chat_id': widget.chatId,
-          'message': _messageController.text,
-        }),
-      );
-      print('Send message response: ${response.statusCode} ${response.body}');
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        if (data.containsKey('status') && data['status'] == 'error') {
-          if (mounted) {
-            setState(() => errorMessage = 'خطا در ارسال پیام');
-          }
-          return;
-        }
-        if (mounted) {
-          setState(() => _messageController.clear());
-          await Future.delayed(const Duration(seconds: 1));
-          _fetchMessages();
-        }
-      } else {
-        if (mounted) {
-          setState(() => errorMessage = 'خطا در ارسال پیام');
-        }
-      }
-    } catch (e) {
-      print('Error sending message: $e');
-      if (mounted) {
-        setState(() => errorMessage = 'خطای شبکه در ارسال پیام');
-      }
-    }
-  }
-
   Future<void> _playVoice(String? url) async {
     if (url == null || url.isEmpty) {
       print('Invalid voice URL: $url');
       if (mounted) {
-        setState(() => errorMessage = 'آدرس صوتی معتبر نیست');
+        setState(() {
+          errorMessage = 'آدرس صوتی معتبر نیست';
+          _errorMessageColor = isDarkMode ? Colors.red[300] : Colors.redAccent;
+        });
       }
       return;
     }
@@ -497,6 +863,7 @@ class _ConversationScreenState extends State<ConversationScreen>
           _isAudioLoading = false;
           _isPlaying = false;
           errorMessage = 'خطا در پخش پیام صوتی';
+          _errorMessageColor = isDarkMode ? Colors.red[300] : Colors.redAccent;
         });
       }
     }
@@ -515,7 +882,10 @@ class _ConversationScreenState extends State<ConversationScreen>
     } catch (e) {
       print('Error stopping audio: $e');
       if (mounted) {
-        setState(() => errorMessage = 'خطا در توقف پخش');
+        setState(() {
+          errorMessage = 'خطا در توقف پخش';
+          _errorMessageColor = isDarkMode ? Colors.red[300] : Colors.redAccent;
+        });
       }
     }
   }
@@ -542,7 +912,6 @@ class _ConversationScreenState extends State<ConversationScreen>
 
   @override
   void dispose() {
-    _pollTimer?.cancel();
     _scrollController.dispose();
     _messageController.dispose();
     _audioPlayer.dispose();
@@ -565,12 +934,6 @@ class _ConversationScreenState extends State<ConversationScreen>
         : const Color(0xFF5181B8);
     final Color textColor = isDarkMode ? Colors.white : Colors.black87;
     final Color errorColor = isDarkMode ? Colors.red[300]! : Colors.redAccent;
-    final Color outgoingBubbleColor = isDarkMode
-        ? const Color(0xFF005F4B)
-        : const Color(0xFFDCF8C6);
-    final Color incomingBubbleColor = isDarkMode
-        ? const Color(0xFF2A3A4A)
-        : const Color(0xFFFFFFFF);
 
     return Scaffold(
       backgroundColor: backgroundColor,
@@ -587,6 +950,13 @@ class _ConversationScreenState extends State<ConversationScreen>
         elevation: 0,
         actions: [
           IconButton(
+            icon: const Icon(
+              Icons.refresh,
+              color: Colors.white,
+            ),
+            onPressed: _fetchMessages,
+          ),
+          IconButton(
             icon: Icon(
               isDarkMode ? Icons.wb_sunny : Icons.nightlight_round,
               color: Colors.white,
@@ -600,28 +970,41 @@ class _ConversationScreenState extends State<ConversationScreen>
           if (errorMessage != null)
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              color: errorColor.withOpacity(0.2),
+              color: (_errorMessageColor ?? errorColor).withOpacity(0.2),
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   Text(
                     errorMessage!,
                     style: TextStyle(
-                      color: errorColor,
+                      color: _errorMessageColor ?? errorColor,
                       fontSize: 14,
                       fontFamily: 'Vazir',
                     ),
                   ),
-                  TextButton(
-                    onPressed: () => _fetchMessages(),
-                    child: Text(
-                      'تلاش مجدد',
-                      style: TextStyle(
-                        color: isDarkMode ? Colors.blue[300] : Colors.blue[600],
-                        fontFamily: 'Vazir',
+                  if (errorMessage!.contains('تلاش مجدد') ||
+                      errorMessage!.contains('نیاز به احراز هویت'))
+                    TextButton(
+                      onPressed: () {
+                        setState(() {
+                          _fetchRetryCount = 0;
+                          _sendMessageRetryCount = 0;
+                          _sendVoiceRetryCount = 0;
+                          errorMessage = null;
+                          _errorMessageColor = null;
+                        });
+                        _fetchMessages();
+                      },
+                      child: Text(
+                        'تلاش مجدد',
+                        style: TextStyle(
+                          color: isDarkMode
+                              ? Colors.blue[300]
+                              : Colors.blue[600],
+                          fontFamily: 'Vazir',
+                        ),
                       ),
                     ),
-                  ),
                 ],
               ),
             ),
@@ -683,8 +1066,12 @@ class _ConversationScreenState extends State<ConversationScreen>
                                 padding: const EdgeInsets.all(10.0),
                                 decoration: BoxDecoration(
                                   color: message.isOutgoing
-                                      ? outgoingBubbleColor
-                                      : incomingBubbleColor,
+                                      ? (isDarkMode
+                                            ? const Color(0xFF005F4B)
+                                            : const Color(0xFFDCF8C6))
+                                      : (isDarkMode
+                                            ? const Color(0xFF2A3A4A)
+                                            : const Color(0xFFFFFFFF)),
                                   borderRadius: BorderRadius.circular(12.0),
                                   boxShadow: [
                                     BoxShadow(
@@ -729,10 +1116,14 @@ class _ConversationScreenState extends State<ConversationScreen>
                                                         message.voiceUrl,
                                                       );
                                                     } else {
-                                                      setState(
-                                                        () => errorMessage =
-                                                            'پیام صوتی در دسترس نیست',
-                                                      );
+                                                      setState(() {
+                                                        errorMessage =
+                                                            'پیام صوتی در دسترس نیست';
+                                                        _errorMessageColor =
+                                                            isDarkMode
+                                                            ? Colors.red[300]
+                                                            : Colors.redAccent;
+                                                      });
                                                     }
                                                   },
                                           ),
@@ -911,16 +1302,12 @@ class WaveformPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    final barWidth = 1.5; // میله‌های باریک‌تر مثل تلگرام
+    final barWidth = 1.5;
     final barSpacing = 1.0;
     final totalBarWidth = barWidth + barSpacing;
     final barCount = (size.width / totalBarWidth).floor();
     final height = size.height;
 
-    // نرمال‌سازی داده‌ها
-    final normalizedData = _normalizeData(data, barCount);
-
-    // رنگ‌های پس‌زمینه و پیش‌زمینه
     final bgPaint = Paint()
       ..color = isDarkMode ? Colors.grey[600]! : Colors.grey[400]!
       ..style = PaintingStyle.fill;
@@ -937,26 +1324,22 @@ class WaveformPainter extends CustomPainter {
         end: Alignment.bottomCenter,
       ).createShader(Rect.fromLTWH(0, 0, size.width, height));
 
+    final normalizedData = _normalizeData(data, barCount);
+
     for (int i = 0; i < barCount; i++) {
       final x = i * totalBarWidth;
       final dataIndex = (i * (normalizedData.length / barCount)).floor().clamp(
         0,
         normalizedData.length - 1,
       );
-      var amplitude =
-          normalizedData[dataIndex] *
-          (height / 2) *
-          0.6; // ارتفاع کوتاه‌تر مثل تلگرام
+      var amplitude = normalizedData[dataIndex] * (height / 2) * 0.6;
 
-      // اعمال انیمیشن مقیاس
       if (isPlaying && (x / size.width) <= progress) {
         amplitude *= animationValue;
       }
 
-      // حداقل ارتفاع میله
       amplitude = amplitude < 1.0 ? 1.0 : amplitude;
 
-      // رسم میله
       final paint = (isPlaying && (x / size.width) <= progress)
           ? fgPaint
           : bgPaint;
@@ -973,7 +1356,6 @@ class WaveformPainter extends CustomPainter {
   List<double> _normalizeData(List<double> data, int barCount) {
     if (data.isEmpty) return List.filled(barCount, 0.1);
 
-    // حذف مقادیر غیرمعتبر و نرمال‌سازی
     final filteredData = data.where((x) => x.isFinite && x >= 0).toList();
     if (filteredData.isEmpty) return List.filled(barCount, 0.1);
 
@@ -982,7 +1364,6 @@ class WaveformPainter extends CustomPainter {
         .map((x) => maxAmplitude > 0 ? x / maxAmplitude : 0.1)
         .toList();
 
-    // تنظیم تعداد میله‌ها
     final step = normalized.length / barCount;
     final result = <double>[];
     for (var i = 0; i < barCount; i++) {

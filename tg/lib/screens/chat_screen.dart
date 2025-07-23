@@ -27,6 +27,9 @@ class _ChatScreenState extends State<ChatScreen> {
   bool isDarkMode = true;
   SharedPreferences? _prefs;
   final TextEditingController _searchController = TextEditingController();
+  int retryCount = 0;
+  static const int maxRetries = 10;
+  static const Duration baseDelay = Duration(seconds: 2);
 
   @override
   void initState() {
@@ -52,7 +55,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final lastFetchTime =
         _prefs?.getInt('last_fetch_time_${widget.phoneNumber}') ?? 0;
     final currentTime = DateTime.now().millisecondsSinceEpoch;
-    return (currentTime - lastFetchTime) > 10 * 60 * 1000;
+    return (currentTime - lastFetchTime) > 10 * 60 * 1000; // 10 minutes
   }
 
   Future<void> _loadCachedChats() async {
@@ -107,80 +110,97 @@ class _ChatScreenState extends State<ChatScreen> {
   }) async {
     if (isLoadingMore) return;
 
-    try {
-      if (!background) {
-        setState(() {
-          if (!loadMore) {
-            isLoading = true;
-          } else {
-            isLoadingMore = true;
-          }
-          errorMessage = null;
-        });
-      }
-      final response = await http.post(
-        Uri.parse('http://192.168.1.3:8000/get_chats'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({
-          'phone_number': widget.phoneNumber,
-          'offset': loadMore ? offset : 0,
-          'limit': limit,
-        }),
-      );
-
-      print('Get chats response: ${response.statusCode} ${response.body}');
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        final newChats = (data['chats'] as List<dynamic>)
-            .map((json) => Chat.fromJson(json))
-            .toList();
-        if (mounted) {
+    while (retryCount < maxRetries && mounted) {
+      try {
+        if (!background) {
           setState(() {
-            final uniqueChats = <int, Chat>{};
-            for (var chat in chats) {
-              uniqueChats[chat.id] = chat;
+            if (!loadMore) {
+              isLoading = true;
+            } else {
+              isLoadingMore = true;
             }
-            for (var chat in newChats) {
-              uniqueChats[chat.id] = chat;
-            }
-            chats = uniqueChats.values.toList();
-            chats.sort(
-              (a, b) => int.parse(
-                b.order ?? '0',
-              ).compareTo(int.parse(a.order ?? '0')),
-            );
-            offset = chats.length;
-            if (!background) {
+            errorMessage = loadMore
+                ? null
+                : 'در حال اتصال به سرور... تلاش ${retryCount + 1}';
+          });
+        }
+
+        final response = await http.post(
+          Uri.parse('http://192.168.1.3:8000/get_chats'),
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode({
+            'phone_number': widget.phoneNumber,
+            'offset': loadMore ? offset : 0,
+            'limit': limit,
+          }),
+        );
+
+        print('Get chats response: ${response.statusCode} ${response.body}');
+        if (response.statusCode == 200) {
+          final data = jsonDecode(response.body);
+          final newChats = (data['chats'] as List<dynamic>)
+              .map((json) => Chat.fromJson(json))
+              .toList();
+          if (mounted) {
+            setState(() {
+              final uniqueChats = <int, Chat>{};
+              for (var chat in chats) {
+                uniqueChats[chat.id] = chat;
+              }
+              for (var chat in newChats) {
+                uniqueChats[chat.id] = chat;
+              }
+              chats = uniqueChats.values.toList();
+              chats.sort(
+                (a, b) => int.parse(
+                  b.order ?? '0',
+                ).compareTo(int.parse(a.order ?? '0')),
+              );
+              offset = chats.length;
+              if (!background) {
+                isLoading = false;
+                isLoadingMore = false;
+              }
+              _prefs?.setString(
+                'cached_chats_${widget.phoneNumber}',
+                jsonEncode(chats.map((chat) => chat.toJson()).toList()),
+              );
+              _prefs?.setInt(
+                'last_fetch_time_${widget.phoneNumber}',
+                DateTime.now().millisecondsSinceEpoch,
+              );
+              retryCount = 0; // Reset retry count on success
+            });
+          }
+          return;
+        } else {
+          throw Exception(
+            'Backend responded with status: ${response.statusCode}',
+          );
+        }
+      } catch (e) {
+        retryCount++;
+        if (retryCount >= maxRetries) {
+          if (mounted && !background) {
+            setState(() {
+              errorMessage =
+                  'خطا در اتصال به سرور پس از $maxRetries تلاش. لطفاً دوباره تلاش کنید.';
               isLoading = false;
               isLoadingMore = false;
-            }
-            _prefs?.setString(
-              'cached_chats_${widget.phoneNumber}',
-              jsonEncode(chats.map((chat) => chat.toJson()).toList()),
-            );
-            _prefs?.setInt(
-              'last_fetch_time_${widget.phoneNumber}',
-              DateTime.now().millisecondsSinceEpoch,
-            );
-          });
+            });
+          }
+          return;
         }
-      } else {
+
+        // Exponential backoff
+        final delay = baseDelay * (1 << retryCount);
         if (mounted && !background) {
           setState(() {
-            errorMessage = 'خطا در دریافت چت‌ها';
-            isLoading = false;
-            isLoadingMore = false;
+            errorMessage =
+                'خطا در اتصال. تلاش مجدد پس از ${delay.inSeconds} ثانیه...';
           });
         }
-      }
-    } catch (e, stackTrace) {
-      print('Error fetching chats: $e\n$stackTrace');
-      if (mounted && !background) {
-        setState(() {
-          errorMessage = 'خطای شبکه در دریافت چت‌ها';
-          isLoading = false;
-          isLoadingMore = false;
-        });
+        await Future.delayed(delay);
       }
     }
   }
@@ -255,6 +275,7 @@ class _ChatScreenState extends State<ChatScreen> {
             icon: const Icon(Icons.refresh, color: Colors.white),
             onPressed: () {
               offset = 0;
+              retryCount = 0;
               _fetchChats();
             },
           ),
@@ -310,6 +331,7 @@ class _ChatScreenState extends State<ChatScreen> {
               backgroundColor: backgroundColor,
               onRefresh: () async {
                 offset = 0;
+                retryCount = 0;
                 await _fetchChats();
               },
               child: Column(
@@ -333,7 +355,10 @@ class _ChatScreenState extends State<ChatScreen> {
                             ),
                           ),
                           TextButton(
-                            onPressed: () => _fetchChats(),
+                            onPressed: () {
+                              retryCount = 0;
+                              _fetchChats();
+                            },
                             child: Text(
                               'تلاش مجدد',
                               style: TextStyle(
