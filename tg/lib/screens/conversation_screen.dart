@@ -159,6 +159,7 @@ class _ConversationScreenState extends State<ConversationScreen>
 
   Future<bool> _checkSession() async {
     try {
+      print('Checking session for phone_number=${widget.phoneNumber}');
       setState(() {
         errorMessage = 'در حال بررسی جلسه...';
         _errorMessageColor = isDarkMode
@@ -170,10 +171,17 @@ class _ConversationScreenState extends State<ConversationScreen>
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({'phone_number': widget.phoneNumber}),
       );
+      print('Check session response: ${response.statusCode} ${response.body}');
+
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
-        bool isAuthenticated = data['is_authenticated'];
+        bool isAuthenticated = data['is_authenticated'] ?? false;
+        print(
+          'Session check result: isAuthenticated=$isAuthenticated, auth_state=${data['auth_state']}',
+        );
+
         if (!isAuthenticated && mounted) {
+          print('Not authenticated, redirecting to AuthScreen');
           Navigator.pushReplacement(
             context,
             MaterialPageRoute(
@@ -186,32 +194,70 @@ class _ConversationScreenState extends State<ConversationScreen>
               ),
             ),
           );
+        } else if (isAuthenticated) {
+          print('Authenticated, clearing error and fetching messages');
+          if (mounted) {
+            setState(() {
+              errorMessage = null;
+              _errorMessageColor = null;
+              isLoading = true; // Ensure loading state is set
+            });
+          }
+          print('Calling fetchMessages after session check');
+          _isRetrying = false; // Reset _isRetrying to avoid blocking
+          await _fetchMessages();
+          print('fetchMessages completed after session check');
         }
-        print('Check session response: ${response.statusCode} $data');
         return isAuthenticated;
+      } else {
+        print('Check session failed with status: ${response.statusCode}');
+        throw Exception(
+          'Check session failed with status: ${response.statusCode}',
+        );
       }
-      return false;
-    } catch (e) {
-      print('Error checking session: $e');
+    } catch (e, stackTrace) {
+      print('Error checking session: $e\n$stackTrace');
+      if (mounted) {
+        setState(() {
+          errorMessage = 'خطا در بررسی جلسه: $e';
+          _errorMessageColor = isDarkMode ? Colors.red[300] : Colors.redAccent;
+        });
+      }
       return false;
     }
   }
 
   Future<void> _fetchMessages({int? fromMessageId, int limit = 50}) async {
-    if (isLoadingMore || _isRetrying) return;
+    if (isLoadingMore || _isRetrying) {
+      print(
+        'Fetch messages blocked: isLoadingMore=$isLoadingMore, _isRetrying=$_isRetrying',
+      );
+      return;
+    }
     _isRetrying = true;
+    bool wasLoadingMore = isLoadingMore; // Store initial state
 
     try {
-      setState(() {
-        if (fromMessageId == null) {
-          isLoading = true;
-          errorMessage = 'در حال اتصال به سرور';
-          _errorMessageColor = isDarkMode ? Colors.red[300] : Colors.redAccent;
-        } else {
-          isLoadingMore = true;
-        }
-      });
+      print(
+        'Starting fetchMessages: fromMessageId=$fromMessageId, limit=$limit',
+      );
+      if (mounted) {
+        setState(() {
+          if (fromMessageId == null) {
+            isLoading = true;
+            errorMessage = 'در حال اتصال به سرور';
+            _errorMessageColor = isDarkMode
+                ? Colors.red[300]
+                : Colors.redAccent;
+          } else {
+            isLoadingMore = true;
+          }
+        });
+      }
 
+      print(
+        'Sending get messages request: phone_number=${widget.phoneNumber}, chat_id=${widget.chatId}, from_message_id=${fromMessageId ?? 0}',
+      );
       final response = await http.post(
         Uri.parse('http://192.168.1.3:8000/get_messages'),
         headers: {'Content-Type': 'application/json'},
@@ -223,9 +269,6 @@ class _ConversationScreenState extends State<ConversationScreen>
         }),
       );
 
-      print(
-        'Get messages request: phone_number=${widget.phoneNumber}, chat_id=${widget.chatId}, from_message_id=${fromMessageId ?? 0}',
-      );
       print('Get messages response: ${response.statusCode} ${response.body}');
 
       if (response.statusCode == 200) {
@@ -242,6 +285,7 @@ class _ConversationScreenState extends State<ConversationScreen>
               _fetchRetryCount = 0;
             });
           }
+          print('No messages received from server');
           return;
         }
 
@@ -309,35 +353,24 @@ class _ConversationScreenState extends State<ConversationScreen>
         if (newMessages.length < limit &&
             fromMessageId == null &&
             newMessages.isNotEmpty) {
+          print('Fetching more messages from oldestMessageId=$oldestMessageId');
+          _isRetrying = false; // Reset before recursive call
           await _fetchMessages(fromMessageId: oldestMessageId, limit: limit);
         }
         return;
       } else if (response.statusCode == 401) {
+        print('Unauthorized, checking session');
         bool isAuthenticated = await _checkSession();
-        if (!isAuthenticated) {
-          if (mounted) {
-            setState(() {
-              isLoading = false;
-              isLoadingMore = false;
-              errorMessage = 'نیاز به احراز هویت. لطفاً وارد شوید.';
-              _errorMessageColor = isDarkMode
-                  ? Colors.red[300]
-                  : Colors.redAccent;
-              _fetchRetryCount = 0;
-            });
-          }
-          return;
-        }
-        print('Retrying fetch messages after session check');
-        if (mounted) {
+        if (!isAuthenticated && mounted) {
           setState(() {
-            errorMessage = 'در حال تلاش مجدد...';
+            isLoading = false;
+            isLoadingMore = false;
+            errorMessage = 'نیاز به احراز هویت. لطفاً وارد شوید.';
             _errorMessageColor = isDarkMode
-                ? Colors.yellow[300]
-                : Colors.yellowAccent;
+                ? Colors.red[300]
+                : Colors.redAccent;
+            _fetchRetryCount = 0;
           });
-          await Future.delayed(const Duration(seconds: 1));
-          await _fetchMessages(fromMessageId: fromMessageId, limit: limit);
         }
         return;
       } else {
@@ -347,7 +380,7 @@ class _ConversationScreenState extends State<ConversationScreen>
       }
     } catch (e, stackTrace) {
       print('Error fetching messages: $e\n$stackTrace');
-      if (_fetchRetryCount >= maxRetries - 1) {
+      if (_fetchRetryCount >= maxRetries) {
         if (mounted) {
           setState(() {
             errorMessage =
@@ -360,52 +393,51 @@ class _ConversationScreenState extends State<ConversationScreen>
             _fetchRetryCount = 0;
           });
         }
+        print('Max retries reached, stopping fetch attempts');
         return;
       }
 
-      if (e.toString().contains('SocketException')) {
-        final delaySeconds =
-            retryDelaysInSeconds[_fetchRetryCount < retryDelaysInSeconds.length
-                ? _fetchRetryCount
-                : retryDelaysInSeconds.length - 1];
-        _fetchRetryCount++;
+      final delaySeconds =
+          retryDelaysInSeconds[_fetchRetryCount < retryDelaysInSeconds.length
+              ? _fetchRetryCount
+              : retryDelaysInSeconds.length - 1];
+      _fetchRetryCount++;
+      if (mounted) {
+        setState(() {
+          errorMessage =
+              'تلاش مجدد در حال اتصال به سرور، تلاش $_fetchRetryCount، پس از $delaySeconds ثانیه';
+          _errorMessageColor = isDarkMode ? Colors.red[300] : Colors.redAccent;
+          isLoadingMore = false; // Reset isLoadingMore for retry
+        });
+        print('Waiting for $delaySeconds seconds before retry (fetch)...');
+        await Future.delayed(Duration(seconds: delaySeconds));
+        print('Retry after $delaySeconds seconds completed (fetch).');
         if (mounted) {
-          setState(() {
-            errorMessage =
-                'تلاش مجدد در حال اتصال به سرور، تلاش $_fetchRetryCount، پس از $delaySeconds ثانیه';
-            _errorMessageColor = isDarkMode
-                ? Colors.red[300]
-                : Colors.redAccent;
-          });
-          print('Waiting for $delaySeconds seconds before retry...');
-          await Future.delayed(Duration(seconds: delaySeconds));
-          print('Retry after $delaySeconds seconds completed.');
-          if (mounted) {
-            await _fetchMessages(fromMessageId: fromMessageId, limit: limit);
-          }
+          print('Attempting retry fetchMessages, attempt $_fetchRetryCount');
+          _isRetrying = false; // Reset before retry to avoid blocking
+          await _fetchMessages(limit: limit); // Mimic refresh button behavior
+        } else {
+          print('Widget not mounted, skipping retry');
         }
       } else {
-        if (mounted) {
-          setState(() {
-            errorMessage = 'در حال تلاش مجدد...';
-            _errorMessageColor = isDarkMode
-                ? Colors.yellow[300]
-                : Colors.yellowAccent;
-          });
-          print('Retrying fetch messages after non-network error');
-          await Future.delayed(const Duration(seconds: 1));
-          if (mounted) {
-            await _fetchMessages(fromMessageId: fromMessageId, limit: limit);
-          }
-        }
+        print('Widget not mounted, skipping retry');
       }
     } finally {
       _isRetrying = false;
+      isLoadingMore = wasLoadingMore; // Restore original isLoadingMore state
+      print(
+        'Fetch messages finally block: _isRetrying reset to false, isLoadingMore=$isLoadingMore',
+      );
     }
   }
 
   Future<void> _sendMessage() async {
-    if (_messageController.text.trim().isEmpty || _isRetrying) return;
+    if (_messageController.text.trim().isEmpty || _isRetrying) {
+      print(
+        'Send message blocked: empty message=${_messageController.text.trim().isEmpty}, _isRetrying=$_isRetrying',
+      );
+      return;
+    }
     _isRetrying = true;
 
     try {
@@ -414,6 +446,9 @@ class _ConversationScreenState extends State<ConversationScreen>
         _errorMessageColor = isDarkMode ? Colors.red[300] : Colors.redAccent;
       });
 
+      print(
+        'Sending message request: phone_number=${widget.phoneNumber}, chat_id=${widget.chatId}, message=${_messageController.text}',
+      );
       final response = await http.post(
         Uri.parse('http://192.168.1.3:8000/send_message'),
         headers: {'Content-Type': 'application/json'},
@@ -456,27 +491,14 @@ class _ConversationScreenState extends State<ConversationScreen>
         return;
       } else if (response.statusCode == 401) {
         bool isAuthenticated = await _checkSession();
-        if (!isAuthenticated) {
-          if (mounted) {
-            setState(() {
-              errorMessage = 'نیاز به احراز هویت. لطفاً وارد شوید.';
-              _errorMessageColor = isDarkMode
-                  ? Colors.red[300]
-                  : Colors.redAccent;
-              _sendMessageRetryCount = 0;
-            });
-          }
-          return;
-        }
-        if (mounted) {
+        if (!isAuthenticated && mounted) {
           setState(() {
-            errorMessage = 'در حال تلاش مجدد...';
+            errorMessage = 'نیاز به احراز هویت. لطفاً وارد شوید.';
             _errorMessageColor = isDarkMode
-                ? Colors.yellow[300]
-                : Colors.yellowAccent;
+                ? Colors.red[300]
+                : Colors.redAccent;
+            _sendMessageRetryCount = 0;
           });
-          await Future.delayed(const Duration(seconds: 1));
-          await _sendMessage();
         }
         return;
       } else {
@@ -486,7 +508,7 @@ class _ConversationScreenState extends State<ConversationScreen>
       }
     } catch (e, stackTrace) {
       print('Error sending message: $e\n$stackTrace');
-      if (_sendMessageRetryCount >= maxRetries - 1) {
+      if (_sendMessageRetryCount >= maxRetries) {
         if (mounted) {
           setState(() {
             errorMessage =
@@ -497,48 +519,40 @@ class _ConversationScreenState extends State<ConversationScreen>
             _sendMessageRetryCount = 0;
           });
         }
+        _isRetrying = false; // Ensure _isRetrying is reset
         return;
       }
 
-      if (e.toString().contains('SocketException')) {
-        final delaySeconds =
-            retryDelaysInSeconds[_sendMessageRetryCount <
-                    retryDelaysInSeconds.length
-                ? _sendMessageRetryCount
-                : retryDelaysInSeconds.length - 1];
-        _sendMessageRetryCount++;
+      final delaySeconds =
+          retryDelaysInSeconds[_sendMessageRetryCount <
+                  retryDelaysInSeconds.length
+              ? _sendMessageRetryCount
+              : retryDelaysInSeconds.length - 1];
+      _sendMessageRetryCount++;
+      if (mounted) {
+        setState(() {
+          errorMessage =
+              'تلاش مجدد در حال اتصال به سرور، تلاش $_sendMessageRetryCount، پس از $delaySeconds ثانیه';
+          _errorMessageColor = isDarkMode ? Colors.red[300] : Colors.redAccent;
+        });
+        print('Waiting for $delaySeconds seconds before retry (send)...');
+        await Future.delayed(Duration(seconds: delaySeconds));
+        print('Retry after $delaySeconds seconds completed (send).');
         if (mounted) {
-          setState(() {
-            errorMessage =
-                'تلاش مجدد در حال اتصال به سرور، تلاش $_sendMessageRetryCount، پس از $delaySeconds ثانیه';
-            _errorMessageColor = isDarkMode
-                ? Colors.red[300]
-                : Colors.redAccent;
-          });
-          print('Waiting for $delaySeconds seconds before retry...');
-          await Future.delayed(Duration(seconds: delaySeconds));
-          print('Retry after $delaySeconds seconds completed.');
-          if (mounted) {
-            await _sendMessage();
-          }
+          print(
+            'Attempting retry sendMessage, attempt $_sendMessageRetryCount',
+          );
+          _isRetrying = false; // Reset before retry to avoid blocking
+          await _sendMessage(); // Retry sending the message
+        } else {
+          print('Widget not mounted, skipping retry');
         }
       } else {
-        if (mounted) {
-          setState(() {
-            errorMessage = 'در حال تلاش مجدد...';
-            _errorMessageColor = isDarkMode
-                ? Colors.yellow[300]
-                : Colors.yellowAccent;
-          });
-          print('Retrying fetch messages after non-network error');
-          await Future.delayed(const Duration(seconds: 1));
-          if (mounted) {
-            await _sendMessage();
-          }
-        }
+        print('Widget not mounted, skipping retry');
       }
     } finally {
       _isRetrying = false;
+      print('Send message finally block: _isRetrying reset to false');
     }
   }
 
@@ -639,28 +653,16 @@ class _ConversationScreenState extends State<ConversationScreen>
         return;
       } else if (response.statusCode == 401) {
         bool isAuthenticated = await _checkSession();
-        if (!isAuthenticated) {
-          if (mounted) {
-            setState(() {
-              errorMessage = 'نیاز به احراز هویت. لطفاً وارد شوید.';
-              _errorMessageColor = isDarkMode
-                  ? Colors.red[300]
-                  : Colors.redAccent;
-              _sendVoiceRetryCount = 0;
-            });
-          }
-          return;
-        }
-        if (mounted) {
+        if (!isAuthenticated && mounted) {
           setState(() {
-            errorMessage = 'در حال تلاش مجدد...';
+            errorMessage = 'نیاز به احراز هویت. لطفاً وارد شوید.';
             _errorMessageColor = isDarkMode
-                ? Colors.yellow[300]
-                : Colors.yellowAccent;
+                ? Colors.red[300]
+                : Colors.redAccent;
+            _sendVoiceRetryCount = 0;
           });
-          await Future.delayed(const Duration(seconds: 1));
-          await _sendVoiceMessage();
         }
+        // No need to retry send voice here since _checkSession handles fetching
         return;
       } else {
         throw Exception(
@@ -713,7 +715,7 @@ class _ConversationScreenState extends State<ConversationScreen>
                 ? Colors.yellow[300]
                 : Colors.yellowAccent;
           });
-          print('Retrying fetch messages after non-network error');
+          print('Retrying send voice message after non-network error');
           await Future.delayed(const Duration(seconds: 1));
           if (mounted) {
             await _sendVoiceMessage();
