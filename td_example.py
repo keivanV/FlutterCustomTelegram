@@ -128,7 +128,7 @@ class TdExample:
             logger.error(f"Error receiving TDLib event: {e}")
         return None
 
-    async def _receive_events(self, timeout: float = 5.0):
+    async def _receive_events(self, timeout: float = 15.0):
         """Generator for receiving TDLib events."""
         end_time = asyncio.get_event_loop().time() + timeout
         while asyncio.get_event_loop().time() < end_time:
@@ -162,7 +162,7 @@ class TdExample:
         for attempt in range(max_retries):
             logger.info(f"Checking session, attempt {attempt + 1}")
             self.send({"@type": "getAuthorizationState"})
-            async for event in self._receive_events(timeout=10.0):
+            async for event in self._receive_events(timeout=15.0):
                 if event["@type"] == "updateAuthorizationState":
                     auth_state = event["authorization_state"]["@type"]
                     logger.info(f"Session check state: {auth_state}")
@@ -180,7 +180,7 @@ class TdExample:
                             "application_version": "1.0",
                             "enable_storage_optimizer": True
                         })
-                        async for next_event in self._receive_events(timeout=10.0):
+                        async for next_event in self._receive_events(timeout=15.0):
                             if next_event["@type"] == "updateAuthorizationState":
                                 auth_state = next_event["authorization_state"]["@type"]
                                 logger.info(f"Session check after parameters: {auth_state}")
@@ -239,7 +239,7 @@ class TdExample:
             })
 
         for _ in range(3):
-            async for event in self._receive_events(timeout=10.0):
+            async for event in self._receive_events(timeout=15.0):
                 if event["@type"] == "updateAuthorizationState":
                     auth_state = event["authorization_state"]
                     auth_type = auth_state["@type"]
@@ -410,7 +410,7 @@ class TdExample:
         chat_ids = []
         chats = []
         file_ids = []
-        timeout = 10.0
+        timeout = 15.0
         end_time = asyncio.get_event_loop().time() + timeout
 
         while asyncio.get_event_loop().time() < end_time:
@@ -420,7 +420,6 @@ class TdExample:
                     for chat_id in new_chat_ids:
                         if chat_id not in chat_ids:
                             chat_ids.append(chat_id)
-                            # Request chat details to ensure we have the latest profile photo
                             self.send({"@type": "getChat", "chat_id": chat_id})
                     logger.info(f"Received {len(new_chat_ids)} chat IDs: {new_chat_ids}")
                 elif event["@type"] == "updateNewChat":
@@ -453,7 +452,6 @@ class TdExample:
                     chat_id = event["chat_id"]
                     if chat_id in self.chat_cache and chat_id not in chat_ids:
                         chat_ids.append(chat_id)
-                        # Request chat details to ensure we have the latest profile photo
                         self.send({"@type": "getChat", "chat_id": chat_id})
                         logger.info(f"Chat {chat_id} added to list via updateChatAddedToList")
                 elif event["@type"] == "error":
@@ -521,10 +519,10 @@ class TdExample:
                             logger.info(f"Decoded waveform for chat {chat['id']}: {waveform_data[:10]}...")
                         except Exception as e:
                             logger.error(f"Failed to decode waveform for chat {chat['id']}: {e}")
-                            waveform_data = [0.1] * 60  # Default waveform
+                            waveform_data = [0.1] * 60
                     else:
                         logger.warning(f"No waveform data for chat {chat['id']}, using default")
-                        waveform_data = [0.1] * 60  # Default waveform
+                        waveform_data = [0.1] * 60
                     if voice_url:
                         chat["last_message"]["content"] = {
                             "@type": "messageVoiceNote",
@@ -562,74 +560,83 @@ class TdExample:
         file_ids = []
         seen_message_ids = set()
         max_retries = 3
+        total_fetched = 0
         current_from_message_id = from_message_id
 
-        for attempt in range(max_retries):
-            logger.info(f"Attempt {attempt + 1} to fetch messages for chat_id: {chat_id} with from_message_id: {current_from_message_id}")
-            self.send({
-                "@type": "getChatHistory",
-                "chat_id": chat_id,
-                "limit": limit,
-                "from_message_id": current_from_message_id,
-                "offset": 0,
-                "only_local": False,
-            })
-            async for event in self._receive_events(timeout=10.0):
-                if event["@type"] == "messages":
-                    new_messages = []
-                    new_file_ids = []
-                    for msg in event.get("messages", []):
-                        if msg["id"] not in seen_message_ids:
-                            seen_message_ids.add(msg["id"])
-                            if msg["content"]["@type"] == "messageText":
-                                new_messages.append({
-                                    "id": msg["id"],
-                                    "content": msg["content"]["text"]["text"],
-                                    "isVoice": False,
-                                    "voiceUrl": None,
-                                    "duration": 0,
-                                    "is_outgoing": msg["is_outgoing"],
-                                    "date": msg["date"],
-                                })
-                            elif msg["content"]["@type"] == "messageVoiceNote":
-                                voice_file_id = msg["content"]["voice_note"]["voice"]["id"]
-                                waveform = msg["content"]["voice_note"].get("waveform", "")
-                                duration = msg["content"]["voice_note"].get("duration", 0)
-                                new_file_ids.append((voice_file_id, "voice"))
-                                waveform_data = []
-                                if isinstance(waveform, str) and waveform:
-                                    try:
-                                        waveform_data = [b / 255.0 for b in base64.b64decode(waveform)]
-                                        logger.info(f"Decoded waveform for message {msg['id']}: {waveform_data[:10]}...")
-                                    except Exception as e:
-                                        logger.error(f"Failed to decode waveform for message {msg['id']}: {e}")
-                                        waveform_data = [0.1] * 60  # Default waveform
-                                else:
-                                    logger.warning(f"No waveform data for message {msg['id']}, using default")
-                                    waveform_data = [0.1] * 60  # Default waveform
-                                new_messages.append({
-                                    "id": msg["id"],
-                                    "content": "[Voice Message]",
-                                    "isVoice": True,
-                                    "voiceUrl": None,
-                                    "duration": duration,
-                                    "is_outgoing": msg["is_outgoing"],
-                                    "date": msg["date"],
-                                    "voice_file_id": voice_file_id,
-                                    "waveformData": waveform_data,
-                                })
-                    messages.extend(new_messages)
-                    file_ids.extend(new_file_ids)
-                    logger.info(f"Received {len(new_messages)} new messages on attempt {attempt + 1}")
+        while total_fetched < limit:
+            for attempt in range(max_retries):
+                logger.info(f"Attempt {attempt + 1} to fetch messages for chat_id: {chat_id} with from_message_id: {current_from_message_id}")
+                self.send({
+                    "@type": "getChatHistory",
+                    "chat_id": chat_id,
+                    "limit": min(limit - total_fetched, 100),  # Telegram API max limit is 100
+                    "from_message_id": current_from_message_id,
+                    "offset": 0,
+                    "only_local": False,
+                })
+                batch_messages = []
+                batch_file_ids = []
+                async for event in self._receive_events(timeout=15.0):
+                    if event["@type"] == "messages":
+                        logger.info(f"Raw messages event: {event}")
+                        for msg in event.get("messages", []):
+                            if msg["id"] not in seen_message_ids:
+                                seen_message_ids.add(msg["id"])
+                                if msg["content"]["@type"] == "messageText":
+                                    batch_messages.append({
+                                        "id": msg["id"],
+                                        "content": msg["content"]["text"]["text"],
+                                        "isVoice": False,
+                                        "voiceUrl": None,
+                                        "duration": 0,
+                                        "is_outgoing": msg["is_outgoing"],
+                                        "date": msg["date"],
+                                    })
+                                elif msg["content"]["@type"] == "messageVoiceNote":
+                                    voice_file_id = msg["content"]["voice_note"]["voice"]["id"]
+                                    waveform = msg["content"]["voice_note"].get("waveform", "")
+                                    duration = msg["content"]["voice_note"].get("duration", 0)
+                                    batch_file_ids.append((voice_file_id, "voice"))
+                                    waveform_data = []
+                                    if isinstance(waveform, str) and waveform:
+                                        try:
+                                            waveform_data = [b / 255.0 for b in base64.b64decode(waveform)]
+                                            logger.info(f"Decoded waveform for message {msg['id']}: {waveform_data[:10]}...")
+                                        except Exception as e:
+                                            logger.error(f"Failed to decode waveform for message {msg['id']}: {e}")
+                                            waveform_data = [0.1] * 60
+                                    else:
+                                        logger.warning(f"No waveform data for message {msg['id']}, using default")
+                                        waveform_data = [0.1] * 60
+                                    batch_messages.append({
+                                        "id": msg["id"],
+                                        "content": "[Voice Message]",
+                                        "isVoice": True,
+                                        "voiceUrl": None,
+                                        "duration": duration,
+                                        "is_outgoing": msg["is_outgoing"],
+                                        "date": msg["date"],
+                                        "voice_file_id": voice_file_id,
+                                        "waveformData": waveform_data,
+                                    })
+                        logger.info(f"Received {len(batch_messages)} new messages on attempt {attempt + 1}")
+                        break
+                    elif event["@type"] == "error":
+                        logger.error(f"TDLib error in get_messages: {event}")
+                        break
+                if batch_messages or event.get("@type") == "error":
+                    messages.extend(batch_messages)
+                    file_ids.extend(batch_file_ids)
+                    total_fetched += len(batch_messages)
+                    logger.info(f"Total messages fetched so far: {total_fetched}")
+                    if batch_messages:
+                        current_from_message_id = min([msg["id"] for msg in batch_messages])
                     break
-                elif event["@type"] == "error":
-                    logger.error(f"TDLib error in get_messages: {event}")
-                    break
-            if messages or event.get("@type") == "error":
+                logger.warning(f"No messages received on attempt {attempt + 1}, retrying")
+                await asyncio.sleep(1.0)
+            if not batch_messages or total_fetched >= limit:
                 break
-            logger.warning(f"No messages received on attempt {attempt + 1}, retrying with from_message_id: 0")
-            current_from_message_id = 0
-            await asyncio.sleep(1.0)
+            logger.info(f"Fetching more messages with from_message_id: {current_from_message_id}")
 
         if not messages and attempt == max_retries - 1:
             logger.error(f"Failed to fetch messages for chat_id: {chat_id} after {max_retries} attempts")
@@ -661,7 +668,7 @@ class TdExample:
             },
         })
         message_id = None
-        async for event in self._receive_events(timeout=5.0):
+        async for event in self._receive_events(timeout=15.0):
             if event["@type"] == "message" and event["chat_id"] == chat_id:
                 if message_id is None and event["id"] not in self.sent_message_ids:
                     message_id = event["id"]
@@ -701,11 +708,10 @@ class TdExample:
             voice_dir = os.path.join(self.session_path, "voice")
             os.makedirs(voice_dir, exist_ok=True)
 
-            # Trim the initial 100ms of the voice file to remove noise
             trimmed_wav_path = voice_path.replace(".wav", "_trimmed.wav")
             try:
                 audio = AudioSegment.from_file(voice_path, format="wav")
-                audio = audio[100:]  # Trim first 100ms
+                audio = audio[100:]
                 audio = audio.set_channels(1).set_sample_width(2).set_frame_rate(16000)
                 audio.export(trimmed_wav_path, format="wav")
                 logger.info(f"Trimmed {voice_path} to {trimmed_wav_path}")
@@ -724,12 +730,11 @@ class TdExample:
             waveform = generate_waveform(trimmed_wav_path)
             if not waveform:
                 logger.warning(f"Waveform generation failed for {trimmed_wav_path}, using default")
-                waveform = [0.1] * 60  # Default waveform
+                waveform = [0.1] * 60
             logger.info(f"Generated waveform for {trimmed_wav_path}: {waveform[:10]}...")
 
-            # Encode waveform for TDLib
             waveform_encoded = base64.b64encode(
-                bytes([int(x * 31) for x in waveform])  # TDLib expects 5-bit values (0-31)
+                bytes([int(x * 31) for x in waveform])
             ).decode('utf-8')
 
             self.send({
@@ -741,7 +746,7 @@ class TdExample:
                         "@type": "inputFileLocal",
                         "path": oga_path
                     },
-                    "duration": max(0, duration - 1),  # Adjust duration for trimmed portion
+                    "duration": max(0, duration - 1),
                     "waveform": waveform_encoded
                 }
             })
@@ -771,7 +776,7 @@ class TdExample:
                                 logger.info(f"TDLib returned waveform for message {message_id}: {event_waveform_data[:10]}...")
                             except Exception as e:
                                 logger.error(f"Failed to decode TDLib waveform for message {message_id}: {e}")
-                                event_waveform_data = waveform  # Fallback to generated waveform
+                                event_waveform_data = waveform
                         else:
                             logger.warning(f"No waveform returned by TDLib for message {message_id}, using generated")
                             event_waveform_data = waveform

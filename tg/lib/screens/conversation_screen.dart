@@ -230,7 +230,7 @@ class _ConversationScreenState extends State<ConversationScreen>
 
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
-        if (data['messages'] == null) {
+        if (data['messages'] == null || data['messages'].isEmpty) {
           if (mounted) {
             setState(() {
               isLoading = false;
@@ -292,9 +292,25 @@ class _ConversationScreenState extends State<ConversationScreen>
             errorMessage = null;
             _errorMessageColor = null;
             _fetchRetryCount = 0;
+            // Scroll to the bottom after initial load
+            if (fromMessageId == null && _isAtBottom) {
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (_scrollController.hasClients) {
+                  _scrollController.jumpTo(
+                    _scrollController.position.maxScrollExtent,
+                  );
+                }
+              });
+            }
           });
         }
         print('Messages fetched successfully: ${newMessages.length} messages');
+        // Fetch more messages if fewer than limit were received and fromMessageId was not set
+        if (newMessages.length < limit &&
+            fromMessageId == null &&
+            newMessages.isNotEmpty) {
+          await _fetchMessages(fromMessageId: oldestMessageId, limit: limit);
+        }
         return;
       } else if (response.statusCode == 401) {
         bool isAuthenticated = await _checkSession();
@@ -950,10 +966,7 @@ class _ConversationScreenState extends State<ConversationScreen>
         elevation: 0,
         actions: [
           IconButton(
-            icon: const Icon(
-              Icons.refresh,
-              color: Colors.white,
-            ),
+            icon: const Icon(Icons.refresh, color: Colors.white),
             onPressed: _fetchMessages,
           ),
           IconButton(
