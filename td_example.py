@@ -526,7 +526,7 @@ class TdExample:
                     if voice_url:
                         chat["last_message"]["content"] = {
                             "@type": "messageVoiceNote",
-                            "text": "[Voice Message]",
+                            "text": "🔈 پیغام صوتی",
                             "voice_note": {
                                 "duration": chat["last_message"]["content"]["voice_note"]["duration"],
                                 "waveform": waveform_data,
@@ -610,7 +610,7 @@ class TdExample:
                                         waveform_data = [0.1] * 60
                                     batch_messages.append({
                                         "id": msg["id"],
-                                        "content": "[Voice Message]",
+                                        "content": "🔈 پیغام صوتی",
                                         "isVoice": True,
                                         "voiceUrl": None,
                                         "duration": duration,
@@ -816,7 +816,7 @@ class TdExample:
 
                 response = {
                     "id": message_id,
-                    "content": "[Voice Message]",
+                    "content": "🔈 پیغام صوتی",
                     "isVoice": True,
                     "voiceUrl": file_url,
                     "duration": max(0, duration - 1),

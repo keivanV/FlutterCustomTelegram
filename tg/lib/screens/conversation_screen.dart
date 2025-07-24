@@ -161,7 +161,7 @@ class _ConversationScreenState extends State<ConversationScreen>
     try {
       print('Checking session for phone_number=${widget.phoneNumber}');
       setState(() {
-        errorMessage = 'در حال بررسی جلسه...';
+        errorMessage = 'در حال بررسی نشست...';
         _errorMessageColor = isDarkMode
             ? Colors.yellow[300]
             : Colors.yellowAccent;

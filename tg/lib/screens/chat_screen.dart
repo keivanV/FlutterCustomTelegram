@@ -2,7 +2,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:intl/intl.dart';
+import 'package:shamsi_date/shamsi_date.dart';
 import '../models/chat.dart';
 import '../widgets/chat_tile.dart';
 import 'conversation_screen.dart';
@@ -21,6 +21,7 @@ class _ChatScreenState extends State<ChatScreen> {
   bool isLoading = true;
   bool isLoadingMore = false;
   String? errorMessage;
+  Color? _errorMessageColor; // Add color for error/success message
   int offset = 0;
   final int limit = 20;
   final ScrollController _scrollController = ScrollController();
@@ -63,6 +64,7 @@ class _ChatScreenState extends State<ChatScreen> {
     setState(() {
       isLoading = true;
       errorMessage = null;
+      _errorMessageColor = null;
     });
     final cachedChats = _prefs?.getString('cached_chats_${widget.phoneNumber}');
     if (cachedChats != null) {
@@ -87,10 +89,12 @@ class _ChatScreenState extends State<ChatScreen> {
           });
         }
       } catch (e) {
-        print('Error loading cached chats: $e');
         if (mounted) {
           setState(() {
             errorMessage = 'خطا در بارگذاری چت‌های ذخیره‌شده';
+            _errorMessageColor = isDarkMode
+                ? Colors.red[300]
+                : Colors.redAccent;
             isLoading = false;
           });
         }
@@ -116,12 +120,13 @@ class _ChatScreenState extends State<ChatScreen> {
           setState(() {
             if (!loadMore) {
               isLoading = true;
+              errorMessage = 'بروز رسانی لیست مخاطبین ${retryCount + 1}';
+              _errorMessageColor = isDarkMode
+                  ? Colors.yellow[300]
+                  : Colors.yellowAccent;
             } else {
               isLoadingMore = true;
             }
-            errorMessage = loadMore
-                ? null
-                : 'در حال اتصال به سرور... تلاش ${retryCount + 1}';
           });
         }
 
@@ -135,7 +140,6 @@ class _ChatScreenState extends State<ChatScreen> {
           }),
         );
 
-        print('Get chats response: ${response.statusCode} ${response.body}');
         if (response.statusCode == 200) {
           final data = jsonDecode(response.body);
           final newChats = (data['chats'] as List<dynamic>)
@@ -143,6 +147,10 @@ class _ChatScreenState extends State<ChatScreen> {
               .toList();
           if (mounted) {
             setState(() {
+              if (!background && !loadMore) {
+                errorMessage = 'در حال به‌روزرسانی...';
+                _errorMessageColor = Colors.green;
+              }
               final uniqueChats = <int, Chat>{};
               for (var chat in chats) {
                 uniqueChats[chat.id] = chat;
@@ -160,6 +168,15 @@ class _ChatScreenState extends State<ChatScreen> {
               if (!background) {
                 isLoading = false;
                 isLoadingMore = false;
+                // Clear success message after 2 seconds
+                Future.delayed(const Duration(seconds: 2), () {
+                  if (mounted) {
+                    setState(() {
+                      errorMessage = null;
+                      _errorMessageColor = null;
+                    });
+                  }
+                });
               }
               _prefs?.setString(
                 'cached_chats_${widget.phoneNumber}',
@@ -174,34 +191,54 @@ class _ChatScreenState extends State<ChatScreen> {
           }
           return;
         } else {
-          throw Exception(
-            'Backend responded with status: ${response.statusCode}',
-          );
-        }
-      } catch (e) {
-        retryCount++;
-        if (retryCount >= maxRetries) {
-          if (mounted && !background) {
-            setState(() {
-              errorMessage =
-                  'خطا در اتصال به سرور پس از $maxRetries تلاش. لطفاً دوباره تلاش کنید.';
+          setState(() {
+            errorMessage =
+                'خطا در اتصال به سرور: کد وضعیت ${response.statusCode}';
+            _errorMessageColor = isDarkMode
+                ? Colors.red[300]
+                : Colors.redAccent;
+            if (!background) {
               isLoading = false;
               isLoadingMore = false;
-            });
-          }
-          return;
+            }
+          });
         }
+      } catch (e) {
+        setState(() {
+          errorMessage = 'خطا در اتصال به سرور: $e';
+          _errorMessageColor = isDarkMode ? Colors.red[300] : Colors.redAccent;
+          if (!background) {
+            isLoading = false;
+            isLoadingMore = false;
+          }
+        });
+      }
 
-        // Exponential backoff
-        final delay = baseDelay * (1 << retryCount);
+      retryCount++;
+      if (retryCount >= maxRetries) {
         if (mounted && !background) {
           setState(() {
             errorMessage =
-                'خطا در اتصال. تلاش مجدد پس از ${delay.inSeconds} ثانیه...';
+                'خطا در اتصال به سرور پس از $maxRetries تلاش. لطفاً دوباره تلاش کنید.';
+            _errorMessageColor = isDarkMode
+                ? Colors.red[300]
+                : Colors.redAccent;
+            isLoading = false;
+            isLoadingMore = false;
           });
         }
-        await Future.delayed(delay);
+        return;
       }
+
+      final delay = baseDelay * (1 << retryCount);
+      if (mounted && !background) {
+        setState(() {
+          errorMessage =
+              'خطا در اتصال. تلاش مجدد پس از ${delay.inSeconds} ثانیه...';
+          _errorMessageColor = isDarkMode ? Colors.red[300] : Colors.redAccent;
+        });
+      }
+      await Future.delayed(delay);
     }
   }
 
@@ -238,15 +275,37 @@ class _ChatScreenState extends State<ChatScreen> {
     final Color textColor = isDarkMode ? Colors.white : Colors.black87;
     final Color errorColor = isDarkMode ? Colors.red[300]! : Colors.redAccent;
 
+    // Format today's date in Persian (YYYY/MM/DD)
+    final jalaliDate = Jalali.now();
+    final today =
+        '${jalaliDate.year}/${jalaliDate.month.toString().padLeft(2, '0')}/${jalaliDate.day.toString().padLeft(2, '0')}';
+
     return Scaffold(
       backgroundColor: backgroundColor,
       appBar: AppBar(
-        title: const Text(
-          'تلگرام',
-          style: TextStyle(
-            fontFamily: 'Vazir',
-            fontSize: 18,
-            fontWeight: FontWeight.w600,
+        title: RichText(
+          textDirection: TextDirection.rtl, // Right-to-left for Persian
+          text: TextSpan(
+            children: [
+              const TextSpan(
+                text: 'ویس گرام ',
+                style: TextStyle(
+                  fontFamily: 'Vazir',
+                  fontSize: 18,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.white,
+                ),
+              ),
+              TextSpan(
+                text: today,
+                style: const TextStyle(
+                  fontFamily: 'Vazir',
+                  fontSize: 14, // Smaller font size for date
+                  fontWeight: FontWeight.w400,
+                  color: Colors.white70,
+                ),
+              ),
+            ],
           ),
         ),
         backgroundColor: appBarColor,
@@ -342,33 +401,36 @@ class _ChatScreenState extends State<ChatScreen> {
                         horizontal: 16,
                         vertical: 8,
                       ),
-                      color: errorColor.withOpacity(0.2),
+                      color:
+                          _errorMessageColor?.withOpacity(0.2) ??
+                          errorColor.withOpacity(0.2),
                       child: Row(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
                           Text(
                             errorMessage!,
                             style: TextStyle(
-                              color: errorColor,
+                              color: _errorMessageColor ?? errorColor,
                               fontSize: 14,
                               fontFamily: 'Vazir',
                             ),
                           ),
-                          TextButton(
-                            onPressed: () {
-                              retryCount = 0;
-                              _fetchChats();
-                            },
-                            child: Text(
-                              'تلاش مجدد',
-                              style: TextStyle(
-                                color: isDarkMode
-                                    ? Colors.blue[300]
-                                    : Colors.blue[600],
-                                fontFamily: 'Vazir',
+                          if (_errorMessageColor != Colors.green)
+                            TextButton(
+                              onPressed: () {
+                                retryCount = 0;
+                                _fetchChats();
+                              },
+                              child: Text(
+                                'تلاش مجدد',
+                                style: TextStyle(
+                                  color: isDarkMode
+                                      ? Colors.blue[300]
+                                      : Colors.blue[600],
+                                  fontFamily: 'Vazir',
+                                ),
                               ),
                             ),
-                          ),
                         ],
                       ),
                     ),

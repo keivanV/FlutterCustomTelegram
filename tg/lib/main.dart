@@ -11,7 +11,6 @@ import 'themes/telegram_theme.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  // Initialize date formatting for the default locale
   await initializeDateFormatting();
   runApp(MyApp());
 }
@@ -28,6 +27,7 @@ class MyApp extends StatelessWidget {
           darkTheme: telegramDarkTheme,
           themeMode: ThemeMode.system,
           home: LoadingScreen(),
+          debugShowCheckedModeBanner: false,
         );
       },
     );
@@ -61,13 +61,10 @@ class _LoadingScreenState extends State<LoadingScreen> {
           errorMessage = 'Connecting to backend... Attempt ${retryCount + 1}';
         });
 
-        // Attempt to check backend availability using /check_session
         final response = await http.post(
           Uri.parse('http://localhost:8000/check_session'),
           headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({
-            'phone_number': phoneNumber ?? '',
-          }),
+          body: jsonEncode({'phone_number': phoneNumber ?? ''}),
         );
 
         if (response.statusCode == 200) {
@@ -75,7 +72,6 @@ class _LoadingScreenState extends State<LoadingScreen> {
           String initialState = data['auth_state'];
           bool isAuthenticated = data['is_authenticated'];
 
-          // Navigate to AuthScreen or ChatScreen based on authentication state
           if (mounted) {
             if (isAuthenticated && phoneNumber != null) {
               Navigator.pushReplacement(
@@ -90,7 +86,8 @@ class _LoadingScreenState extends State<LoadingScreen> {
                 MaterialPageRoute(
                   builder: (context) => AuthScreen(
                     phoneNumber: phoneNumber,
-                    initialState: initialState == 'authorizationStateWaitPhoneNumber'
+                    initialState:
+                        initialState == 'authorizationStateWaitPhoneNumber'
                         ? 'wait_phone'
                         : initialState,
                   ),
@@ -100,22 +97,25 @@ class _LoadingScreenState extends State<LoadingScreen> {
           }
           return;
         } else {
-          throw Exception('Backend responded with status: ${response.statusCode}');
+          throw Exception(
+            'Backend responded with status: ${response.statusCode}',
+          );
         }
       } catch (e) {
         retryCount++;
         if (retryCount >= maxRetries) {
           setState(() {
-            errorMessage = 'Failed to connect to backend after $maxRetries attempts. Please try again later.';
+            errorMessage =
+                'Failed to connect to backend after $maxRetries attempts. Please try again later.';
             isConnecting = false;
           });
           return;
         }
 
-        // Exponential backoff
         final delay = baseDelay * (1 << retryCount);
         setState(() {
-          errorMessage = 'Connection failed. Retrying in ${delay.inSeconds} seconds...';
+          errorMessage =
+              'Connection failed. Retrying in ${delay.inSeconds} seconds...';
         });
         await Future.delayed(delay);
       }

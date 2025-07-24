@@ -537,7 +537,7 @@ class TdExample:
                     if voice_url:
                         chat["last_message"]["content"] = {
                             "@type": "messageVoiceNote",
-                            "text": "[Voice Message]",
+                            "text": "🔈 پیغام صوتی",
                             "voice_note": {
                                 "duration": chat["last_message"]["content"]["voice_note"]["duration"],
                                 "waveform": waveform,
@@ -643,7 +643,7 @@ class TdExample:
                 if voice_url:
                     msg["content"] = {
                         "@type": "messageVoiceNote",
-                        "text": "[Voice Message]",
+                        "text": "🔈 پیغام صوتی",
                         "voice_note": {
                             "duration": msg["content"]["voice_note"]["duration"],
                             "waveform": waveform,
@@ -834,7 +834,7 @@ class TdExample:
                     "id": message_id,
                     "content": {
                         "@type": "messageVoiceNote",
-                        "text": "[Voice Message]",
+                        "text": "🔈 پیغام صوتی",
                         "voice_note": {
                             "duration": duration,
                             "waveform": waveform,

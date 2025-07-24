@@ -27,7 +27,7 @@ class Chat {
         lastMessage =
             json['last_message']['content']['text']['text'] ?? 'No message';
       } else if (contentType == 'messageVoiceNote') {
-        lastMessage = '[Voice Message]';
+        lastMessage = '🔈 پیغام صوتی';
       } else {
         lastMessage = 'Unsupported message type';
       }
@@ -56,7 +56,7 @@ class Chat {
       'last_message': lastMessage != null
           ? {
               'content': {
-                '@type': lastMessage == '[Voice Message]'
+                '@type': lastMessage == '🔈 پیغام صوتی'
                     ? 'messageVoiceNote'
                     : 'messageText',
                 'text': {'text': lastMessage},
