@@ -149,11 +149,11 @@ class _ConversationScreenState extends State<ConversationScreen>
       final currentScroll = _scrollController.position.pixels;
       _isAtBottom = currentScroll >= maxScroll - 50;
 
-      if (currentScroll <= _scrollController.position.minScrollExtent + 100 &&
-          !isLoadingMore &&
-          oldestMessageId != null) {
-        _fetchMessages(fromMessageId: oldestMessageId);
-      }
+      // if (currentScroll <= _scrollController.position.minScrollExtent + 100 &&
+      //     !isLoadingMore &&
+      //     oldestMessageId != null) {
+      //   _fetchMessages(fromMessageId: oldestMessageId);
+      // }
     }
   }
 

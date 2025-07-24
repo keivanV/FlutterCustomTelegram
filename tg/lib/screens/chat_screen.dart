@@ -21,7 +21,7 @@ class _ChatScreenState extends State<ChatScreen> {
   bool isLoading = true;
   bool isLoadingMore = false;
   String? errorMessage;
-  Color? _errorMessageColor; // Add color for error/success message
+  Color? _errorMessageColor;
   int offset = 0;
   final int limit = 20;
   final ScrollController _scrollController = ScrollController();
@@ -31,6 +31,7 @@ class _ChatScreenState extends State<ChatScreen> {
   int retryCount = 0;
   static const int maxRetries = 10;
   static const Duration baseDelay = Duration(seconds: 2);
+  String? userFullName;
 
   @override
   void initState() {
@@ -42,6 +43,7 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _initPrefsAndLoadChats() async {
     _prefs = await SharedPreferences.getInstance();
     isDarkMode = _prefs?.getBool('isDarkMode') ?? true;
+    userFullName = _prefs?.getString('user_full_name') ?? 'کاربر';
     await _loadCachedChats();
     if (chats.isEmpty || _isCacheOutdated()) {
       await _fetchChats(background: true);
@@ -168,7 +170,6 @@ class _ChatScreenState extends State<ChatScreen> {
               if (!background) {
                 isLoading = false;
                 isLoadingMore = false;
-                // Clear success message after 2 seconds
                 Future.delayed(const Duration(seconds: 2), () {
                   if (mounted) {
                     setState(() {
@@ -186,7 +187,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 'last_fetch_time_${widget.phoneNumber}',
                 DateTime.now().millisecondsSinceEpoch,
               );
-              retryCount = 0; // Reset retry count on success
+              retryCount = 0;
             });
           }
           return;
@@ -284,7 +285,7 @@ class _ChatScreenState extends State<ChatScreen> {
       backgroundColor: backgroundColor,
       appBar: AppBar(
         title: RichText(
-          textDirection: TextDirection.rtl, // Right-to-left for Persian
+          textDirection: TextDirection.rtl,
           text: TextSpan(
             children: [
               const TextSpan(
@@ -300,7 +301,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 text: today,
                 style: const TextStyle(
                   fontFamily: 'Vazir',
-                  fontSize: 14, // Smaller font size for date
+                  fontSize: 14,
                   fontWeight: FontWeight.w400,
                   color: Colors.white70,
                 ),
@@ -310,10 +311,14 @@ class _ChatScreenState extends State<ChatScreen> {
         ),
         backgroundColor: appBarColor,
         elevation: 0,
-        leading: IconButton(
-          icon: const Icon(Icons.menu, color: Colors.white),
-          onPressed: () {
-            Scaffold.of(context).openDrawer();
+        leading: Builder(
+          builder: (BuildContext context) {
+            return IconButton(
+              icon: const Icon(Icons.menu, color: Colors.white),
+              onPressed: () {
+                Scaffold.of(context).openDrawer();
+              },
+            );
           },
         ),
         actions: [
@@ -347,13 +352,23 @@ class _ChatScreenState extends State<ChatScreen> {
             DrawerHeader(
               decoration: BoxDecoration(color: appBarColor),
               child: const Text(
-                'منو',
+                'ویس گرام',
                 style: TextStyle(
                   fontFamily: 'Vazir',
                   color: Colors.white,
                   fontSize: 24,
                 ),
               ),
+            ),
+            ListTile(
+              leading: const Icon(Icons.person),
+              title: Text(
+                userFullName ?? 'کاربر',
+                style: const TextStyle(fontFamily: 'Vazir'),
+              ),
+              onTap: () {
+                Navigator.pop(context);
+              },
             ),
             ListTile(
               leading: const Icon(Icons.settings),
@@ -369,6 +384,27 @@ class _ChatScreenState extends State<ChatScreen> {
               leading: const Icon(Icons.group_add),
               title: const Text(
                 'گروه جدید',
+                style: TextStyle(fontFamily: 'Vazir'),
+              ),
+              onTap: () {
+                Navigator.pop(context);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.support_agent),
+              title: const Text(
+                'پشتیبانی',
+                style: TextStyle(fontFamily: 'Vazir'),
+              ),
+              onTap: () {
+                Navigator.pop(context);
+                // TODO: Add support action (e.g., open email or chat)
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.info),
+              title: const Text(
+                'نسخه برنامه: ۱ بتا',
                 style: TextStyle(fontFamily: 'Vazir'),
               ),
               onTap: () {
