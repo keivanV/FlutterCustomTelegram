@@ -282,30 +282,34 @@ class _ChatScreenState extends State<ChatScreen> {
     return Scaffold(
       backgroundColor: backgroundColor,
       appBar: AppBar(
-        title: RichText(
-          textDirection: TextDirection.rtl,
-          text: TextSpan(
-            children: [
-              const TextSpan(
-                text: 'ویس گرام ',
-                style: TextStyle(
-                  fontFamily: 'Vazir',
-                  fontSize: 18,
-                  fontWeight: FontWeight.w600,
-                  color: Colors.white,
-                ),
+        title: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            // تاریخ در سمت چپ
+            Text(
+              today,
+              style: const TextStyle(
+                fontFamily: 'Vazir',
+                fontSize: 14,
+                fontWeight: FontWeight.w400,
+                color: Colors.white70,
               ),
-              TextSpan(
-                text: today,
-                style: const TextStyle(
-                  fontFamily: 'Vazir',
-                  fontSize: 14,
-                  fontWeight: FontWeight.w400,
-                  color: Colors.white70,
-                ),
+              textAlign: TextAlign.left,
+              textDirection: TextDirection.rtl,
+            ),
+            // ویس گرام در سمت راست
+            Text(
+              'ویس گرام',
+              style: const TextStyle(
+                fontFamily: 'Vazir',
+                fontSize: 18,
+                fontWeight: FontWeight.w600,
+                color: Colors.white,
               ),
-            ],
-          ),
+              textAlign: TextAlign.right,
+              textDirection: TextDirection.rtl,
+            ),
+          ],
         ),
         backgroundColor: appBarColor,
         elevation: 0,

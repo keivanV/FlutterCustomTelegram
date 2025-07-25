@@ -256,21 +256,21 @@ class _ConversationScreenState extends State<ConversationScreen>
 
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
-        if (data['messages'] == null || data['messages'].isEmpty) {
-          if (mounted) {
-            setState(() {
-              isLoading = false;
-              isLoadingMore = false;
-              errorMessage = 'هیچ پیامی دریافت نشد';
-              _errorMessageColor = isDarkMode
-                  ? Colors.red[300]
-                  : Colors.redAccent;
-              _fetchRetryCount = 0;
-            });
-          }
-          print('No messages received from server');
-          return;
-        }
+        // if (data['messages'] == null || data['messages'].isEmpty) {
+        //   if (mounted) {
+        //     setState(() {
+        //       isLoading = false;
+        //       isLoadingMore = false;
+        //       errorMessage = 'هیچ پیامی دریافت نشد';
+        //       _errorMessageColor = isDarkMode
+        //           ? Colors.red[300]
+        //           : Colors.redAccent;
+        //       _fetchRetryCount = 0;
+        //     });
+        //   }
+        //   print('No messages received from server');
+        //   return;
+        // }
 
         if (mounted) {
           setState(() {
