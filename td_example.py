@@ -128,7 +128,7 @@ class TdExample:
             logger.error(f"Error receiving TDLib event: {e}")
         return None
 
-    async def _receive_events(self, timeout: float = 15.0):
+    async def _receive_events(self, timeout: float = 20.0):
         """Generator for receiving TDLib events."""
         end_time = asyncio.get_event_loop().time() + timeout
         while asyncio.get_event_loop().time() < end_time:
@@ -147,11 +147,11 @@ class TdExample:
         """Destroy the TDLib client."""
         self.send({"@type": "close"})
         logger.info(f"Destroying client with ID: {self.client_id}")
-        for _ in range(5):
+        for _ in range(10):  # Increased attempts for robust cleanup
             result = self._td_receive(2.0)
-            if result and json.loads(result.decode("utf-8")).get("@type") == "updateAuthorizationState":
-                auth_state = json.loads(result.decode("utf-8"))["authorization_state"]["@type"]
-                if auth_state == "authorizationStateClosed":
+            if result:
+                event = json.loads(result.decode("utf-8"))
+                if event.get("@type") == "updateAuthorizationState" and event["authorization_state"]["@type"] == "authorizationStateClosed":
                     logger.info(f"Client {self.client_id} closed successfully")
                     break
         self.client_id = 0
@@ -162,11 +162,19 @@ class TdExample:
         for attempt in range(max_retries):
             logger.info(f"Checking session, attempt {attempt + 1}")
             self.send({"@type": "getAuthorizationState"})
-            async for event in self._receive_events(timeout=15.0):
-                if event["@type"] == "updateAuthorizationState":
+            async for event in self._receive_events(timeout=20.0):
+                logger.info(f"Processing event in check_session: {event['@type']}")
+                if event["@type"] == "authorizationStateReady":
+                    logger.info("Session is authenticated (authorizationStateReady)")
+                    return {"is_authenticated": True, "auth_state": "authenticated"}
+                elif event["@type"] == "updateAuthorizationState":
                     auth_state = event["authorization_state"]["@type"]
                     logger.info(f"Session check state: {auth_state}")
-                    if auth_state == "authorizationStateWaitTdlibParameters":
+                    if auth_state == "authorizationStateReady":
+                        logger.info("Session is authenticated via updateAuthorizationState")
+                        return {"is_authenticated": True, "auth_state": "authenticated"}
+                    elif auth_state == "authorizationStateWaitTdlibParameters":
+                        logger.info("Setting TDLib parameters")
                         self.send({
                             "@type": "setTdlibParameters",
                             "use_test_dc": self.use_test_dc,
@@ -180,18 +188,22 @@ class TdExample:
                             "application_version": "1.0",
                             "enable_storage_optimizer": True
                         })
-                        async for next_event in self._receive_events(timeout=15.0):
-                            if next_event["@type"] == "updateAuthorizationState":
-                                auth_state = next_event["authorization_state"]["@type"]
-                                logger.info(f"Session check after parameters: {auth_state}")
-                                return {
-                                    "is_authenticated": auth_state == "authorizationStateReady",
-                                    "auth_state": auth_state
-                                }
-                    return {
-                        "is_authenticated": auth_state == "authorizationStateReady",
-                        "auth_state": auth_state
-                    }
+                    elif auth_state in [
+                        "authorizationStateWaitPhoneNumber",
+                        "authorizationStateWaitCode",
+                        "authorizationStateWaitPassword",
+                        "authorizationStateWaitRegistration",
+                        "authorizationStateWaitEmailAddress",
+                        "authorizationStateWaitEmailCode"
+                    ]:
+                        logger.info(f"Session requires authentication: {auth_state}")
+                        return {"is_authenticated": False, "auth_state": auth_state}
+                    elif auth_state == "authorizationStateClosed":
+                        logger.info("Session closed, recreating client")
+                        self.destroy_client()
+                        self.client_id = self._td_create_client_id()
+                        logger.info(f"Recreated client with ID: {self.client_id}")
+                        break
                 elif event["@type"] == "error":
                     logger.error(f"TDLib error during session check: {event}")
                     if attempt < max_retries - 1:
@@ -201,7 +213,8 @@ class TdExample:
                         logger.info(f"Recreated client with ID: {self.client_id}")
                         await asyncio.sleep(1.0)
                         break
-        logger.warning("No authorization state received after retries")
+            await asyncio.sleep(1.0)
+        logger.warning("No valid authorization state received after retries")
         return {"is_authenticated": False, "auth_state": "unknown"}
 
     async def authenticate(self, phone_number: str = None, code: str = None, password: str = None,
@@ -239,13 +252,13 @@ class TdExample:
             })
 
         for _ in range(3):
-            async for event in self._receive_events(timeout=15.0):
+            async for event in self._receive_events(timeout=20.0):
                 if event["@type"] == "updateAuthorizationState":
                     auth_state = event["authorization_state"]
                     auth_type = auth_state["@type"]
                     logger.info(f"Auth state: {auth_type}")
                     if auth_type == "authorizationStateReady":
-                        return {"status": "authenticated"}
+                        return {"is_authenticated": True, "auth_state": "authenticated"}
                     elif auth_type == "authorizationStateWaitTdlibParameters":
                         self.send({
                             "@type": "setTdlibParameters",
@@ -260,32 +273,38 @@ class TdExample:
                             "application_version": "1.0",
                             "enable_storage_optimizer": True
                         })
-                        return {"status": "parameters_set"}
+                        return {"is_authenticated": False, "auth_state": "parameters_set"}
                     elif auth_type == "authorizationStateWaitPhoneNumber":
-                        return {"status": "wait_phone"}
+                        return {"is_authenticated": False, "auth_state": "wait_phone"}
                     elif auth_type == "authorizationStateWaitCode":
-                        return {"status": "wait_code"}
+                        return {"is_authenticated": False, "auth_state": "wait_code"}
                     elif auth_type == "authorizationStateWaitPassword":
-                        return {"status": "wait_password"}
+                        return {"is_authenticated": False, "auth_state": "wait_password"}
                     elif auth_type == "authorizationStateWaitRegistration":
-                        return {"status": "wait_registration"}
+                        return {"is_authenticated": False, "auth_state": "wait_registration"}
                     elif auth_type == "authorizationStateWaitEmailAddress":
-                        return {"status": "wait_email"}
+                        return {"is_authenticated": False, "auth_state": "wait_email"}
                     elif auth_type == "authorizationStateWaitEmailCode":
-                        return {"status": "wait_email_code"}
+                        return {"is_authenticated": False, "auth_state": "wait_email_code"}
                     elif auth_type == "authorizationStateWaitPremiumPurchase":
-                        return {"status": "wait_premium"}
+                        return {"is_authenticated": False, "auth_state": "wait_premium"}
                     elif auth_type == "authorizationStateClosed":
                         logger.info("Session closed, recreating client")
                         self.destroy_client()
                         self.client_id = self._td_create_client_id()
                         logger.info(f"Recreated client with ID: {self.client_id}")
-                        return {"status": "closed"}
+                        return {"is_authenticated": False, "auth_state": "closed"}
+                elif event["@type"] == "authorizationStateReady":
+                    logger.info("Direct authorizationStateReady received during authenticate")
+                    return {"is_authenticated": True, "auth_state": "authenticated"}
+                elif event["@type"] == "error":
+                    logger.error(f"TDLib error during authenticate: {event}")
+                    return {"is_authenticated": False, "auth_state": f"error: {event['message']}"}
             await asyncio.sleep(1)
         logger.warning("No authorization state received after retries")
-        return {"status": "unknown"}
+        return {"is_authenticated": False, "auth_state": "unknown"}
 
-    async def download_file(self, file_id: int, phone_number: str, file_type: str = "voice", retries: int = 5, timeout: float = 15.0) -> Optional[str]:
+    async def download_file(self, file_id: int, phone_number: str, file_type: str = "voice", retries: int = 5, timeout: float = 20.0) -> Optional[str]:
         """Download a file and return its URL."""
         if file_id in self.file_url_cache:
             logger.info(f"Returning cached URL for file_id: {file_id} ({file_type})")
@@ -410,7 +429,7 @@ class TdExample:
         chat_ids = []
         chats = []
         file_ids = []
-        timeout = 15.0
+        timeout = 20.0
         end_time = asyncio.get_event_loop().time() + timeout
 
         while asyncio.get_event_loop().time() < end_time:
@@ -576,7 +595,7 @@ class TdExample:
                 })
                 batch_messages = []
                 batch_file_ids = []
-                async for event in self._receive_events(timeout=15.0):
+                async for event in self._receive_events(timeout=20.0):
                     if event["@type"] == "messages":
                         logger.info(f"Raw messages event: {event}")
                         for msg in event.get("messages", []):
@@ -668,7 +687,7 @@ class TdExample:
             },
         })
         message_id = None
-        async for event in self._receive_events(timeout=15.0):
+        async for event in self._receive_events(timeout=20.0):
             if event["@type"] == "message" and event["chat_id"] == chat_id:
                 if message_id is None and event["id"] not in self.sent_message_ids:
                     message_id = event["id"]
@@ -798,7 +817,7 @@ class TdExample:
                 return {"status": "error", "message": "Failed to send voice message"}
 
             if file_id and file_uploaded:
-                file_url = await self.download_file(file_id, phone_number, file_type="voice", retries=5, timeout=15.0)
+                file_url = await self.download_file(file_id, phone_number, file_type="voice", retries=5, timeout=20.0)
                 if not file_url:
                     logger.error(f"Failed to get file URL for file_id: {file_id}")
                     return {

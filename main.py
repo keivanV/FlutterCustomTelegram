@@ -1,5 +1,5 @@
 import uvicorn
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from models import AuthRequest, SessionRequest, MessageRequest, SendMessageRequest, SendVoiceMessageRequest, GetChatsRequest
@@ -9,22 +9,28 @@ from typing import Dict
 import json
 import logging
 import hashlib
-import os, time
+import os
+import time
+import asyncio
 
+# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
+# Add CORS middleware with WebSocket support
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Upgrade", "Connection", "Sec-WebSocket-Accept"],
 )
 
 clients: Dict[str, TdExample] = {}
+websocket_connections: Dict[str, WebSocket] = {}
 
 def get_session_path(phone_number: str) -> str:
     """Generate session path from phone number."""
@@ -34,20 +40,92 @@ def get_session_path(phone_number: str) -> str:
     session_id = hashlib.md5(phone_number.encode()).hexdigest()
     return os.path.join("sessions", session_id)
 
+@app.websocket("/ws/test")
+async def websocket_test_endpoint(websocket: WebSocket):
+    """Test WebSocket endpoint that echoes messages without authentication."""
+    logger.info(f"Received test WebSocket connection request from {websocket.client}")
+    try:
+        await websocket.accept()
+        logger.info("Test WebSocket connection accepted")
+        await websocket.send_text("Connected to FastAPI test WebSocket")
+        while True:
+            data = await websocket.receive_text()
+            logger.info(f"Received test message: {data}")
+            await websocket.send_text(f"Echo: {data}")
+    except WebSocketDisconnect:
+        logger.info("Test WebSocket disconnected")
+    except Exception as e:
+        logger.error(f"Test WebSocket error: {e}")
+    finally:
+        logger.info("Test WebSocket connection closed")
+
+@app.websocket("/ws/{phone_number}")
+async def websocket_endpoint(websocket: WebSocket, phone_number: str):
+    """Handle WebSocket connections for TDLib events."""
+    logger.info(f"Received WebSocket connection request for phone: {phone_number}")
+    session_path = get_session_path(phone_number)
+    client = clients.get(session_path)
+    
+    logger.info(f"Session path: {session_path}")
+    logger.info(f"Client: {client}, client_id: {client.client_id if client else 'None'}")
+    if not client or client.client_id == 0:
+        logger.error(f"No valid client found for phone: {phone_number}")
+        await websocket.close(code=1008, reason=f"Client not authenticated for {phone_number}")
+        return
+
+    session_check = await client.check_session()
+    logger.info(f"Session check: {session_check}")
+    if not session_check.get("is_authenticated", False):
+        logger.error(f"Session not authenticated for phone: {phone_number}, state: {session_check['auth_state']}")
+        await websocket.close(code=1008, reason=f"Session not authenticated, state: {session_check['auth_state']}")
+        return
+
+    try:
+        await websocket.accept()
+        websocket_connections[phone_number] = websocket
+        logger.info(f"WebSocket connected for phone: {phone_number}")
+
+        await websocket.send_json({"@type": "connectionEstablished", "phone_number": phone_number})
+
+        while True:
+            try:
+                event = await client.receive(timeout=5.0)
+                if event:
+                    logger.debug(f"Sending event to WebSocket for {phone_number}: {event}")
+                    await websocket.send_json(event)
+            except Exception as e:
+                logger.error(f"Error in receive loop for {phone_number}: {e}")
+                break
+            await asyncio.sleep(0.1)
+    except WebSocketDisconnect:
+        logger.info(f"WebSocket disconnected for phone: {phone_number}")
+    except Exception as e:
+        logger.error(f"WebSocket error for {phone_number}: {e}")
+    finally:
+        websocket_connections.pop(phone_number, None)
+        try:
+            await websocket.close(code=1000, reason="Normal closure")
+        except Exception as e:
+            logger.error(f"Error closing WebSocket for {phone_number}: {e}")
+        logger.info(f"WebSocket connection closed for phone: {phone_number}")
+
 @app.post("/check_session")
 async def check_session(request: SessionRequest):
     """Check if a session exists and is authenticated."""
     logger.info(f"Checking session for phone: {request.phone_number}")
     session_path = get_session_path(request.phone_number)
+    logger.info(f"Session path: {session_path}")
     if not os.path.exists(session_path):
         logger.info(f"No session found at {session_path}")
         return {"is_authenticated": False, "auth_state": "no_session"}
 
     client = clients.get(session_path)
+    logger.info(f"Client exists: {client is not None}, client_id: {client.client_id if client else 'None'}")
     if not client or client.client_id == 0:
         logger.info(f"Creating new client for session: {session_path}")
         client = TdExample(session_path=session_path, api_id=API_ID, api_hash=API_HASH)
         clients[session_path] = client
+        logger.info(f"New client created with client_id: {client.client_id}")
 
     result = await client.check_session()
     logger.info(f"Session check result: {result}")
@@ -57,6 +135,7 @@ async def check_session(request: SessionRequest):
         del clients[session_path]
         client = TdExample(session_path=session_path, api_id=API_ID, api_hash=API_HASH)
         clients[session_path] = client
+        logger.info(f"New client created with client_id: {client.client_id}")
         result = await client.check_session()
     return result
 
@@ -65,12 +144,15 @@ async def authenticate(request: AuthRequest):
     """Authenticate a client with provided credentials."""
     logger.info(f"Authentication request: phone={request.phone_number}, code={request.code}")
     session_path = get_session_path(request.phone_number)
+    logger.info(f"Session path: {session_path}")
     
     client = clients.get(session_path)
+    logger.info(f"Client exists: {client is not None}, client_id: {client.client_id if client else 'None'}")
     if not client or client.client_id == 0:
         logger.info(f"Creating new client for authentication: {session_path}")
         client = TdExample(session_path=session_path, api_id=API_ID, api_hash=API_HASH)
         clients[session_path] = client
+        logger.info(f"New client created with client_id: {client.client_id}")
 
     result = await client.authenticate(
         phone_number=request.phone_number,
@@ -193,7 +275,6 @@ async def get_file(session_id: str, file_type: str, file_name: str, phone_number
         logger.error(f"Session ID mismatch: {session_id} != {expected_session_id}")
         raise HTTPException(status_code=403, detail="Invalid session ID")
 
-    # Map profile_photo to profile_photos directory
     valid_file_types = {"voice": "voice", "profile_photo": "profile_photos", "profile_photos": "profile_photos"}
     if file_type not in valid_file_types:
         logger.error(f"Invalid file type: {file_type}")
@@ -221,7 +302,6 @@ async def head_file(session_id: str, file_type: str, file_name: str, phone_numbe
         logger.error(f"Session ID mismatch: {session_id} != {expected_session_id}")
         raise HTTPException(status_code=403, detail="Invalid session ID")
 
-    # Map profile_photo to profile_photos directory
     valid_file_types = {"voice": "voice", "profile_photo": "profile_photos", "profile_photos": "profile_photos"}
     if file_type not in valid_file_types:
         logger.error(f"Invalid file type: {file_type}")
@@ -245,4 +325,4 @@ async def head_file(session_id: str, file_type: str, file_name: str, phone_numbe
     )
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True, log_level="debug")
