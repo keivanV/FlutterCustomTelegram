@@ -122,10 +122,8 @@ class _ChatScreenState extends State<ChatScreen> {
           setState(() {
             if (!loadMore) {
               isLoading = true;
-              errorMessage = 'بروز رسانی لیست مخاطبین ${retryCount + 1}';
-              _errorMessageColor = isDarkMode
-                  ? Colors.yellow[300]
-                  : Colors.yellowAccent;
+              errorMessage = 'بروز رسانی لیست مخاطبین تلاش ${retryCount + 1}';
+              _errorMessageColor = Colors.white; // رنگ متن سفید
             } else {
               isLoadingMore = true;
             }
@@ -437,9 +435,10 @@ class _ChatScreenState extends State<ChatScreen> {
                         horizontal: 16,
                         vertical: 8,
                       ),
-                      color:
-                          _errorMessageColor?.withOpacity(0.2) ??
-                          errorColor.withOpacity(0.2),
+                      color: errorMessage!.contains('بروز رسانی لیست مخاطبین')
+                          ? Colors.green.withOpacity(0.9) // پس‌زمینه سبز
+                          : (_errorMessageColor?.withOpacity(0.2) ??
+                                errorColor.withOpacity(0.9)),
                       child: Row(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
@@ -451,7 +450,10 @@ class _ChatScreenState extends State<ChatScreen> {
                               fontFamily: 'Vazir',
                             ),
                           ),
-                          if (_errorMessageColor != Colors.green)
+                          if (_errorMessageColor != Colors.green &&
+                              !errorMessage!.contains(
+                                'بروز رسانی لیست مخاطبین',
+                              ))
                             TextButton(
                               onPressed: () {
                                 retryCount = 0;

@@ -86,9 +86,7 @@ class ChatTile extends StatelessWidget {
                   style: TextStyle(
                     fontFamily: 'Vazir',
                     fontSize: 16,
-                    fontWeight: chat.unreadCount > 0
-                        ? FontWeight.w600
-                        : FontWeight.normal,
+                    fontWeight: FontWeight.normal,
                     color: textColor,
                   ),
                   maxLines: 1,
@@ -109,7 +107,7 @@ class ChatTile extends StatelessWidget {
               ],
             ),
           ),
-          // Timestamp and unread count
+          // Timestamp
           Column(
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
@@ -121,27 +119,6 @@ class ChatTile extends StatelessWidget {
                   color: secondaryTextColor,
                 ),
               ),
-              if (chat.unreadCount > 0)
-                Container(
-                  margin: const EdgeInsets.only(top: 4),
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 8,
-                    vertical: 2,
-                  ),
-                  decoration: BoxDecoration(
-                    color: isDarkMode ? Colors.blue[300] : Colors.blue[600],
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: Text(
-                    chat.unreadCount.toString(),
-                    style: const TextStyle(
-                      fontFamily: 'Vazir',
-                      fontSize: 12,
-                      color: Colors.white,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
             ],
           ),
         ],
