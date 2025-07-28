@@ -65,6 +65,8 @@ class _ConversationScreenState extends State<ConversationScreen>
   int _sendVoiceRetryCount = 0;
   Map<String, Message> _pendingMessages = {};
   bool _isSendingMessage = false;
+  bool _isSendingVoice = false;
+  String? _pendingVoiceTempId; // Track tempId for voice message retries
 
   static const int maxRetries = 10;
   static const List<int> retryDelaysInSeconds = [
@@ -209,7 +211,7 @@ class _ConversationScreenState extends State<ConversationScreen>
       print('Error checking session: $e\n$stackTrace');
       if (mounted) {
         setState(() {
-          errorMessage = 'خطا در بررسی جلسه: $e';
+          errorMessage = 'عدم ارتباط با سرور';
           _errorMessageColor = isDarkMode ? Colors.red[300] : Colors.redAccent;
         });
       }
@@ -217,11 +219,14 @@ class _ConversationScreenState extends State<ConversationScreen>
     }
   }
 
-  Future<void> _fetchMessages({int limit = 50, bool loadMore = false}) async {
-    bool isRetrying = false;
+  Future<void> _fetchMessages({
+    int limit = 50,
+    bool loadMore = false,
+    int initialRetryCount = 0,
+  }) async {
     try {
       print(
-        'Starting fetchMessages: limit=$limit, loadMore=$loadMore, oldestMessageId=$oldestMessageId',
+        'Starting fetchMessages: limit=$limit, loadMore=$loadMore, oldestMessageId=$oldestMessageId, initialRetryCount=$initialRetryCount',
       );
       if (mounted) {
         setState(() {
@@ -255,14 +260,6 @@ class _ConversationScreenState extends State<ConversationScreen>
 
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
-        if (mounted && !loadMore) {
-          setState(() {
-            errorMessage = 'در حال دریافت پیام‌ها از سرور';
-            _errorMessageColor = Colors.green;
-          });
-          await Future.delayed(const Duration(seconds: 2));
-        }
-
         final newMessages = (data['messages'] as List<dynamic>)
             .map((json) {
               try {
@@ -294,7 +291,7 @@ class _ConversationScreenState extends State<ConversationScreen>
             messages.sort((a, b) => a.date.compareTo(b.date));
 
             if (newMessages.isNotEmpty) {
-              oldestMessageId = messages.first.id; // Update oldest message ID
+              oldestMessageId = messages.first.id;
             }
 
             print('Updated messages list: ${messages.length} messages');
@@ -305,6 +302,16 @@ class _ConversationScreenState extends State<ConversationScreen>
             _errorMessageColor = null;
             _fetchRetryCount = 0;
           });
+
+          // Retry if fewer than expected messages are loaded on first entry
+          if (!loadMore && newMessages.length < 10 && initialRetryCount < 2) {
+            print(
+              'Initial fetch returned ${newMessages.length} messages, retrying...',
+            );
+            await Future.delayed(const Duration(seconds: 1));
+            await _fetchMessages(initialRetryCount: initialRetryCount + 1);
+            return;
+          }
 
           if (!loadMore) {
             Future.delayed(const Duration(milliseconds: 100), () {
@@ -343,54 +350,21 @@ class _ConversationScreenState extends State<ConversationScreen>
       }
     } catch (e, stackTrace) {
       print('Error fetching messages: $e\n$stackTrace');
-      if (_fetchRetryCount >= maxRetries) {
-        if (mounted) {
-          setState(() {
-            errorMessage =
-                'خطا در اتصال به سرور پس از $maxRetries تلاش. لطفاً دوباره تلاش کنید.';
-            _errorMessageColor = isDarkMode
-                ? Colors.red[300]
-                : Colors.redAccent;
-            isLoading = false;
-            isLoadingMore = false;
-            _fetchRetryCount = 0;
-            // Mark pending messages as rejected
-            _pendingMessages.forEach((key, msg) {
-              messages.removeWhere((m) => m.id.toString() == key);
-              messages.add(msg.copyWith(status: MessageStatus.reject));
-            });
-            _pendingMessages.clear();
+      if (mounted) {
+        setState(() {
+          errorMessage = 'عدم ارتباط با سرور';
+          _errorMessageColor = isDarkMode ? Colors.red[300] : Colors.redAccent;
+          isLoading = false;
+          isLoadingMore = false;
+          _fetchRetryCount = 0;
+          _pendingMessages.forEach((key, msg) {
+            messages.removeWhere((m) => m.id.toString() == key);
+            messages.add(msg.copyWith(status: MessageStatus.reject));
           });
-        }
-        print('Max retries reached, stopping fetch attempts');
-        return;
-      }
-
-      final delaySeconds =
-          retryDelaysInSeconds[_fetchRetryCount < retryDelaysInSeconds.length
-              ? _fetchRetryCount
-              : retryDelaysInSeconds.length - 1];
-      _fetchRetryCount++;
-      if (mounted) {
-        setState(() {
-          errorMessage =
-              'تلاش مجدد در حال اتصال به سرور، تلاش $_fetchRetryCount، پس از $delaySeconds ثانیه';
-          _errorMessageColor = isDarkMode
-              ? Colors.yellow[300]
-              : Colors.yellowAccent;
-        });
-        print('Waiting for $delaySeconds seconds before retry (fetch)...');
-        await Future.delayed(Duration(seconds: delaySeconds));
-        isRetrying = false;
-        await _fetchMessages(limit: limit, loadMore: loadMore);
-      }
-    } finally {
-      if (mounted) {
-        setState(() {
-          isRetrying = false;
+          _pendingMessages.clear();
         });
       }
-      print('Fetch messages finally block: isRetrying reset to false');
+      print('Fetch messages stopped due to network error');
     }
   }
 
@@ -467,7 +441,6 @@ class _ConversationScreenState extends State<ConversationScreen>
           setState(() {
             errorMessage = null;
             _errorMessageColor = null;
-            // Remove pending message by tempId
             messages.removeWhere(
               (msg) => msg.id.toString() == tempId.replaceAll('temp_', ''),
             );
@@ -512,43 +485,17 @@ class _ConversationScreenState extends State<ConversationScreen>
       }
     } catch (e, stackTrace) {
       print('Error sending message: $e\n$stackTrace');
-      if (_sendMessageRetryCount >= maxRetries) {
-        if (mounted) {
-          setState(() {
-            errorMessage =
-                'خطا در ارسال پیام پس از $maxRetries تلاش. لطفاً دوباره تلاش کنید.';
-            _errorMessageColor = isDarkMode
-                ? Colors.red[300]
-                : Colors.redAccent;
-            messages.removeWhere(
-              (msg) => msg.id.toString() == tempId.replaceAll('temp_', ''),
-            );
-            messages.add(pendingMessage.copyWith(status: MessageStatus.reject));
-            _pendingMessages.remove(tempId);
-            _sendMessageRetryCount = 0;
-          });
-        }
-      } else {
-        final delaySeconds =
-            retryDelaysInSeconds[_sendMessageRetryCount <
-                    retryDelaysInSeconds.length
-                ? _sendMessageRetryCount
-                : retryDelaysInSeconds.length - 1];
-        _sendMessageRetryCount++;
-        if (mounted) {
-          setState(() {
-            errorMessage =
-                'تلاش مجدد در ارسال پیام، تلاش $_sendMessageRetryCount، پس از $delaySeconds ثانیه';
-            _errorMessageColor = isDarkMode
-                ? Colors.yellow[300]
-                : Colors.yellowAccent;
-          });
-          print(
-            'Waiting for $delaySeconds seconds before retry (send message)...',
+      if (mounted) {
+        setState(() {
+          errorMessage = 'عدم ارتباط با سرور';
+          _errorMessageColor = isDarkMode ? Colors.red[300] : Colors.redAccent;
+          messages.removeWhere(
+            (msg) => msg.id.toString() == tempId.replaceAll('temp_', ''),
           );
-          await Future.delayed(Duration(seconds: delaySeconds));
-          await _sendMessage();
-        }
+          messages.add(pendingMessage.copyWith(status: MessageStatus.reject));
+          _pendingMessages.remove(tempId);
+          _sendMessageRetryCount = 0;
+        });
       }
     } finally {
       if (mounted) {
@@ -560,18 +507,50 @@ class _ConversationScreenState extends State<ConversationScreen>
     }
   }
 
-  Future<void> _sendVoiceMessage() async {
-    if (_recordedFilePath == null || _recordingDuration == null) {
+  Future<void> _handleRetry() async {
+    print('Retry button pressed');
+    setState(() {
+      _sendVoiceRetryCount = 0;
+      _fetchRetryCount = 0;
+      errorMessage = 'در حال بررسی نشست...';
+      _errorMessageColor = isDarkMode
+          ? Colors.yellow[300]
+          : Colors.yellowAccent;
+    });
+    bool isAuthenticated = await _checkSession();
+    if (isAuthenticated) {
+      await _fetchMessages();
+      if (_recordedFilePath != null &&
+          _pendingVoiceTempId != null &&
+          File(_recordedFilePath!).existsSync()) {
+        print('Retrying pending voice message: tempId=$_pendingVoiceTempId');
+        await _sendVoiceMessage(isManualRetry: true);
+      }
+    }
+  }
+
+  Future<void> _sendVoiceMessage({bool isManualRetry = false}) async {
+    if (_isSendingVoice ||
+        _recordedFilePath == null ||
+        _recordingDuration == null) {
       if (mounted) {
         setState(() {
-          errorMessage = 'هیچ ضبطی برای ارسال موجود نیست';
+          errorMessage = _isSendingVoice
+              ? 'در حال ارسال پیام صوتی...'
+              : 'هیچ ضبطی برای ارسال موجود نیست';
           _errorMessageColor = isDarkMode ? Colors.red[300] : Colors.redAccent;
         });
       }
       return;
     }
 
-    final tempId = 'temp_${DateTime.now().millisecondsSinceEpoch}';
+    setState(() {
+      _isSendingVoice = true;
+    });
+
+    // Reuse existing tempId if retrying, otherwise create new
+    _pendingVoiceTempId ??= 'temp_${DateTime.now().millisecondsSinceEpoch}';
+    final tempId = _pendingVoiceTempId!;
     final pendingMessage = Message(
       id: int.parse(tempId.replaceAll('temp_', '')),
       content: '🔈 پیغام صوتی',
@@ -584,28 +563,35 @@ class _ConversationScreenState extends State<ConversationScreen>
       status: MessageStatus.pending,
     );
 
+    File? voiceFile;
+    dynamic caughtException; // Store exception for finally block
     try {
-      setState(() {
-        errorMessage = 'در حال ارسال پیام صوتی...';
-        _errorMessageColor = isDarkMode
-            ? Colors.yellow[300]
-            : Colors.yellowAccent;
-        _pendingMessages[tempId] = pendingMessage;
-        messages.add(pendingMessage);
-        messages.sort((a, b) => a.date.compareTo(b.date));
-      });
-      Future.delayed(const Duration(milliseconds: 100), () {
-        if (_scrollController.hasClients && mounted) {
-          _scrollController.animateTo(
-            _scrollController.position.maxScrollExtent,
-            duration: const Duration(milliseconds: 300),
-            curve: Curves.easeOut,
-          );
+      // Only add pending message if not already added (unless manual retry)
+      if (!isManualRetry && !_pendingMessages.containsKey(tempId)) {
+        if (mounted) {
+          setState(() {
+            errorMessage = 'در حال ارسال پیام صوتی...';
+            _errorMessageColor = isDarkMode
+                ? Colors.yellow[300]
+                : Colors.yellowAccent;
+            _pendingMessages[tempId] = pendingMessage;
+            messages.add(pendingMessage);
+            messages.sort((a, b) => a.date.compareTo(b.date));
+          });
+          Future.delayed(const Duration(milliseconds: 100), () {
+            if (_scrollController.hasClients && mounted) {
+              _scrollController.animateTo(
+                _scrollController.position.maxScrollExtent,
+                duration: const Duration(milliseconds: 300),
+                curve: Curves.easeOut,
+              );
+            }
+          });
         }
-      });
+      }
 
-      final file = File(_recordedFilePath!);
-      if (!await file.exists()) {
+      voiceFile = File(_recordedFilePath!);
+      if (!await voiceFile.exists()) {
         if (mounted) {
           setState(() {
             errorMessage = 'فایل ضبط‌شده یافت نشد';
@@ -616,6 +602,13 @@ class _ConversationScreenState extends State<ConversationScreen>
               (msg) => msg.id.toString() == tempId.replaceAll('temp_', ''),
             );
             _pendingMessages.remove(tempId);
+            _pendingVoiceTempId = null;
+            _recordedFilePath = null;
+            _recordingDuration = null;
+            _waveformData = null;
+            _isWaveformLoading = false;
+            _isSendingVoice = false;
+            _sendVoiceRetryCount = 0;
           });
         }
         return;
@@ -660,6 +653,11 @@ class _ConversationScreenState extends State<ConversationScreen>
                 pendingMessage.copyWith(status: MessageStatus.reject),
               );
               _pendingMessages.remove(tempId);
+              _pendingVoiceTempId = null;
+              _recordedFilePath = null;
+              _recordingDuration = null;
+              _waveformData = null;
+              _isWaveformLoading = false;
               _sendVoiceRetryCount = 0;
             });
           }
@@ -668,10 +666,6 @@ class _ConversationScreenState extends State<ConversationScreen>
             setState(() {
               errorMessage = null;
               _errorMessageColor = null;
-              _recordedFilePath = null;
-              _recordingDuration = null;
-              _waveformData = null;
-              _isWaveformLoading = false;
               messages.removeWhere(
                 (msg) => msg.id.toString() == tempId.replaceAll('temp_', ''),
               );
@@ -681,6 +675,11 @@ class _ConversationScreenState extends State<ConversationScreen>
               ).copyWith(status: MessageStatus.success);
               messages.add(newMessage);
               messages.sort((a, b) => a.date.compareTo(b.date));
+              _pendingVoiceTempId = null;
+              _recordedFilePath = null;
+              _recordingDuration = null;
+              _waveformData = null;
+              _isWaveformLoading = false;
               _sendVoiceRetryCount = 0;
             });
             Future.delayed(const Duration(milliseconds: 100), () {
@@ -693,7 +692,6 @@ class _ConversationScreenState extends State<ConversationScreen>
               }
             });
           }
-          await file.delete();
         }
       } else if (response.statusCode == 401) {
         bool isAuthenticated = await _checkSession();
@@ -707,6 +705,11 @@ class _ConversationScreenState extends State<ConversationScreen>
               (msg) => msg.id.toString() == tempId.replaceAll('temp_', ''),
             );
             _pendingMessages.remove(tempId);
+            _pendingVoiceTempId = null;
+            _recordedFilePath = null;
+            _recordingDuration = null;
+            _waveformData = null;
+            _isWaveformLoading = false;
             _sendVoiceRetryCount = 0;
           });
         }
@@ -716,12 +719,12 @@ class _ConversationScreenState extends State<ConversationScreen>
         );
       }
     } catch (e, stackTrace) {
+      caughtException = e; // Capture exception for finally block
       print('Error sending voice message: $e\n$stackTrace');
-      if (_sendVoiceRetryCount >= maxRetries) {
+      if (e is SocketException || e is HttpException || e is TimeoutException) {
         if (mounted) {
           setState(() {
-            errorMessage =
-                'خطا در ارسال پیام صوتی پس از $maxRetries تلاش. لطفاً دوباره تلاش کنید.';
+            errorMessage = 'عدم ارتباط با سرور';
             _errorMessageColor = isDarkMode
                 ? Colors.red[300]
                 : Colors.redAccent;
@@ -730,35 +733,64 @@ class _ConversationScreenState extends State<ConversationScreen>
             );
             messages.add(pendingMessage.copyWith(status: MessageStatus.reject));
             _pendingMessages.remove(tempId);
+            _isSendingVoice = false;
             _sendVoiceRetryCount = 0;
           });
         }
       } else {
-        final delaySeconds =
-            retryDelaysInSeconds[_sendVoiceRetryCount <
-                    retryDelaysInSeconds.length
-                ? _sendVoiceRetryCount
-                : retryDelaysInSeconds.length - 1];
-        _sendVoiceRetryCount++;
         if (mounted) {
           setState(() {
-            errorMessage =
-                'تلاش مجدد در ارسال پیام صوتی، تلاش $_sendVoiceRetryCount، پس از $delaySeconds ثانیه';
+            errorMessage = 'خطا در ارسال پیام صوتی: $e';
             _errorMessageColor = isDarkMode
-                ? Colors.yellow[300]
-                : Colors.yellowAccent;
+                ? Colors.red[300]
+                : Colors.redAccent;
+            messages.removeWhere(
+              (msg) => msg.id.toString() == tempId.replaceAll('temp_', ''),
+            );
+            messages.add(pendingMessage.copyWith(status: MessageStatus.reject));
+            _pendingMessages.remove(tempId);
+            _pendingVoiceTempId = null;
+            _recordedFilePath = null;
+            _recordingDuration = null;
+            _waveformData = null;
+            _isWaveformLoading = false;
+            _isSendingVoice = false;
+            _sendVoiceRetryCount = 0;
           });
-          print(
-            'Waiting for $delaySeconds seconds before retry (send voice)...',
-          );
-          await Future.delayed(Duration(seconds: delaySeconds));
-          await _sendVoiceMessage();
+        }
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSendingVoice = false;
+        });
+      }
+      // Clean up the temporary voice file only if send is successful or failed due to non-network error
+      if (voiceFile != null &&
+          await voiceFile.exists() &&
+          (caughtException is! SocketException &&
+              caughtException is! HttpException &&
+              caughtException is! TimeoutException)) {
+        try {
+          await voiceFile.delete();
+          print('Deleted temporary voice file: $_recordedFilePath');
+        } catch (e) {
+          print('Error deleting temporary voice file: $e');
         }
       }
     }
   }
 
   Future<void> _startRecording() async {
+    // Clean up any existing temporary file before starting a new recording
+    if (_recordedFilePath != null && File(_recordedFilePath!).existsSync()) {
+      try {
+        await File(_recordedFilePath!).delete();
+        print('Deleted previous temporary voice file: $_recordedFilePath');
+      } catch (e) {
+        print('Error deleting previous temporary voice file: $e');
+      }
+    }
     try {
       if (await Permission.microphone.request().isGranted) {
         final tempDir = await getTemporaryDirectory();
@@ -781,6 +813,7 @@ class _ConversationScreenState extends State<ConversationScreen>
             _isWaveformLoading = false;
             errorMessage = null;
             _errorMessageColor = null;
+            _pendingVoiceTempId = null; // Reset for new recording
           });
           _recordingTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
             if (!_isRecording || !mounted) {
@@ -1000,9 +1033,12 @@ class _ConversationScreenState extends State<ConversationScreen>
         actions: [
           IconButton(
             icon: const Icon(Icons.refresh, color: Colors.white),
-            onPressed: () {
-              oldestMessageId = null;
-              _fetchMessages();
+            onPressed: () async {
+              bool isAuthenticated = await _checkSession();
+              if (isAuthenticated) {
+                oldestMessageId = null;
+                await _fetchMessages();
+              }
             },
           ),
           IconButton(
@@ -1023,27 +1059,22 @@ class _ConversationScreenState extends State<ConversationScreen>
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  Text(
-                    errorMessage!,
-                    style: TextStyle(
-                      color: _errorMessageColor ?? errorColor,
-                      fontSize: 14,
-                      fontFamily: 'Courier',
+                  Expanded(
+                    child: Text(
+                      errorMessage!,
+                      style: TextStyle(
+                        color: _errorMessageColor ?? errorColor,
+                        fontSize: 14,
+                        fontFamily: 'Courier',
+                      ),
+                      textAlign: TextAlign.center,
                     ),
                   ),
-                  if (errorMessage!.contains('تلاش') ||
-                      errorMessage!.contains('نیاز به احراز هویت'))
+                  if (errorMessage!.contains('عدم ارتباط با سرور') ||
+                      errorMessage!.contains('نیاز به احراز هویت') ||
+                      errorMessage!.contains('خطا در ارسال پیام صوتی'))
                     TextButton(
-                      onPressed: () {
-                        setState(() {
-                          _fetchRetryCount = 0;
-                          _sendMessageRetryCount = 0;
-                          _sendVoiceRetryCount = 0;
-                          errorMessage = null;
-                          _errorMessageColor = null;
-                        });
-                        _fetchMessages();
-                      },
+                      onPressed: _handleRetry,
                       child: Text(
                         'تلاش مجدد',
                         style: TextStyle(
