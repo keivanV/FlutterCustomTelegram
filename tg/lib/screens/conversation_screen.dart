@@ -36,6 +36,8 @@ class _ConversationScreenState extends State<ConversationScreen>
   String? errorMessage;
   Color? _errorMessageColor;
   bool isLoading = true;
+  bool isLoadingMore = false;
+  int? oldestMessageId;
   final TextEditingController _messageController = TextEditingController();
   final AudioPlayers.AudioPlayer _audioPlayer = AudioPlayers.AudioPlayer();
   final Record.AudioRecorder _recorder = Record.AudioRecorder();
@@ -61,7 +63,7 @@ class _ConversationScreenState extends State<ConversationScreen>
   int _fetchRetryCount = 0;
   int _sendMessageRetryCount = 0;
   int _sendVoiceRetryCount = 0;
-  Map<String, String> _pendingMessages = {};
+  Map<String, Message> _pendingMessages = {};
   bool _isSendingMessage = false;
 
   static const int maxRetries = 10;
@@ -96,6 +98,16 @@ class _ConversationScreenState extends State<ConversationScreen>
         curve: Curves.easeInOutSine,
       ),
     );
+    _scrollController.addListener(_scrollListener);
+  }
+
+  void _scrollListener() {
+    if (_scrollController.position.pixels <= 0 &&
+        !isLoadingMore &&
+        oldestMessageId != null) {
+      print('Reached top of ListView, loading more messages');
+      _fetchMessages(loadMore: true);
+    }
   }
 
   Future<void> _initPrefs() async {
@@ -205,20 +217,28 @@ class _ConversationScreenState extends State<ConversationScreen>
     }
   }
 
-  Future<void> _fetchMessages({int limit = 50}) async {
+  Future<void> _fetchMessages({int limit = 50, bool loadMore = false}) async {
     bool isRetrying = false;
     try {
-      print('Starting fetchMessages: limit=$limit');
+      print(
+        'Starting fetchMessages: limit=$limit, loadMore=$loadMore, oldestMessageId=$oldestMessageId',
+      );
       if (mounted) {
         setState(() {
-          isLoading = true;
-          errorMessage = 'در حال اتصال به سرور';
-          _errorMessageColor = isDarkMode ? Colors.red[300] : Colors.redAccent;
+          if (loadMore) {
+            isLoadingMore = true;
+          } else {
+            isLoading = true;
+            errorMessage = 'در حال اتصال به سرور';
+            _errorMessageColor = isDarkMode
+                ? Colors.red[300]
+                : Colors.redAccent;
+          }
         });
       }
 
       print(
-        'Sending get messages request: phone_number=${widget.phoneNumber}, chat_id=${widget.chatId}, limit=$limit',
+        'Sending get messages request: phone_number=${widget.phoneNumber}, chat_id=${widget.chatId}, limit=$limit, from_message_id=${loadMore ? oldestMessageId : 0}',
       );
       final response = await http.post(
         Uri.parse('http://192.168.1.3:8000/get_messages'),
@@ -227,7 +247,7 @@ class _ConversationScreenState extends State<ConversationScreen>
           'phone_number': widget.phoneNumber,
           'chat_id': widget.chatId,
           'limit': limit,
-          'from_message_id': 0,
+          'from_message_id': loadMore ? oldestMessageId : 0,
         }),
       );
 
@@ -235,7 +255,7 @@ class _ConversationScreenState extends State<ConversationScreen>
 
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
-        if (mounted) {
+        if (mounted && !loadMore) {
           setState(() {
             errorMessage = 'در حال دریافت پیام‌ها از سرور';
             _errorMessageColor = Colors.green;
@@ -257,7 +277,7 @@ class _ConversationScreenState extends State<ConversationScreen>
             .toList();
 
         print(
-          'Fetched ${newMessages.length} messages: ${newMessages.map((m) => 'id=${m.id}, content=${m.content}').join(', ')}',
+          'Fetched ${newMessages.length} messages: ${newMessages.map((m) => 'id=${m.id}, content=${m.content}, status=${m.status}').join(', ')}',
         );
 
         if (mounted) {
@@ -267,48 +287,39 @@ class _ConversationScreenState extends State<ConversationScreen>
             );
 
             for (var newMessage in newMessages) {
-              if (newMessage.isOutgoing) {
-                final pendingKey = _pendingMessages.keys.firstWhere(
-                  (key) => _pendingMessages[key] == newMessage.content,
-                  orElse: () => '',
-                );
-                if (pendingKey.isNotEmpty) {
-                  print('Removing pending message with tempId=$pendingKey');
-                  existingMessages.remove(
-                    int.parse(pendingKey.replaceAll('temp_', '')),
-                  );
-                  _pendingMessages.remove(pendingKey);
-                  print(
-                    'Replaced pending message $pendingKey with ${newMessage.id}',
-                  );
-                }
-              }
               existingMessages[newMessage.id] = newMessage;
             }
 
             messages = existingMessages.values.toList();
             messages.sort((a, b) => a.date.compareTo(b.date));
 
+            if (newMessages.isNotEmpty) {
+              oldestMessageId = messages.first.id; // Update oldest message ID
+            }
+
             print('Updated messages list: ${messages.length} messages');
 
             isLoading = false;
+            isLoadingMore = false;
             errorMessage = null;
             _errorMessageColor = null;
             _fetchRetryCount = 0;
           });
 
-          Future.delayed(const Duration(milliseconds: 100), () {
-            if (_scrollController.hasClients && mounted) {
-              print(
-                'Scrolling to maxScrollExtent: ${_scrollController.position.maxScrollExtent}',
-              );
-              _scrollController.animateTo(
-                _scrollController.position.maxScrollExtent,
-                duration: const Duration(milliseconds: 300),
-                curve: Curves.easeOut,
-              );
-            }
-          });
+          if (!loadMore) {
+            Future.delayed(const Duration(milliseconds: 100), () {
+              if (_scrollController.hasClients && mounted) {
+                print(
+                  'Scrolling to maxScrollExtent: ${_scrollController.position.maxScrollExtent}',
+                );
+                _scrollController.animateTo(
+                  _scrollController.position.maxScrollExtent,
+                  duration: const Duration(milliseconds: 300),
+                  curve: Curves.easeOut,
+                );
+              }
+            });
+          }
         }
         print('Messages fetched successfully: ${newMessages.length} messages');
       } else if (response.statusCode == 401) {
@@ -317,6 +328,7 @@ class _ConversationScreenState extends State<ConversationScreen>
         if (!isAuthenticated && mounted) {
           setState(() {
             isLoading = false;
+            isLoadingMore = false;
             errorMessage = 'نیاز به احراز هویت. لطفاً وارد شوید.';
             _errorMessageColor = isDarkMode
                 ? Colors.red[300]
@@ -340,7 +352,14 @@ class _ConversationScreenState extends State<ConversationScreen>
                 ? Colors.red[300]
                 : Colors.redAccent;
             isLoading = false;
+            isLoadingMore = false;
             _fetchRetryCount = 0;
+            // Mark pending messages as rejected
+            _pendingMessages.forEach((key, msg) {
+              messages.removeWhere((m) => m.id.toString() == key);
+              messages.add(msg.copyWith(status: MessageStatus.reject));
+            });
+            _pendingMessages.clear();
           });
         }
         print('Max retries reached, stopping fetch attempts');
@@ -363,7 +382,7 @@ class _ConversationScreenState extends State<ConversationScreen>
         print('Waiting for $delaySeconds seconds before retry (fetch)...');
         await Future.delayed(Duration(seconds: delaySeconds));
         isRetrying = false;
-        await _fetchMessages(limit: limit);
+        await _fetchMessages(limit: limit, loadMore: loadMore);
       }
     } finally {
       if (mounted) {
@@ -393,24 +412,23 @@ class _ConversationScreenState extends State<ConversationScreen>
     });
 
     final tempId = 'temp_${DateTime.now().millisecondsSinceEpoch}';
+    final pendingMessage = Message(
+      id: int.parse(tempId.replaceAll('temp_', '')),
+      content: text,
+      isVoice: false,
+      voiceUrl: null,
+      duration: 0,
+      isOutgoing: true,
+      date: DateTime.now(),
+      waveformData: null,
+      status: MessageStatus.pending,
+    );
 
     try {
       if (mounted) {
         setState(() {
-          _pendingMessages[tempId] = text;
-          messages = [
-            ...messages,
-            Message(
-              id: int.parse(tempId.replaceAll('temp_', '')),
-              content: text,
-              isVoice: false,
-              voiceUrl: null,
-              duration: 0,
-              isOutgoing: true,
-              date: DateTime.now(),
-              waveformData: null,
-            ),
-          ];
+          _pendingMessages[tempId] = pendingMessage;
+          messages.add(pendingMessage);
           messages.sort((a, b) => a.date.compareTo(b.date));
           _messageController.clear();
         });
@@ -449,8 +467,26 @@ class _ConversationScreenState extends State<ConversationScreen>
           setState(() {
             errorMessage = null;
             _errorMessageColor = null;
+            // Remove pending message by tempId
+            messages.removeWhere(
+              (msg) => msg.id.toString() == tempId.replaceAll('temp_', ''),
+            );
+            _pendingMessages.remove(tempId);
+            final newMessage = Message.fromJson(
+              data,
+            ).copyWith(status: MessageStatus.success);
+            messages.add(newMessage);
+            messages.sort((a, b) => a.date.compareTo(b.date));
           });
-          await _fetchMessages();
+          Future.delayed(const Duration(milliseconds: 100), () {
+            if (_scrollController.hasClients && mounted) {
+              _scrollController.animateTo(
+                _scrollController.position.maxScrollExtent,
+                duration: const Duration(milliseconds: 300),
+                curve: Curves.easeOut,
+              );
+            }
+          });
         }
         _sendMessageRetryCount = 0;
       } else if (response.statusCode == 401) {
@@ -462,7 +498,9 @@ class _ConversationScreenState extends State<ConversationScreen>
             _errorMessageColor = isDarkMode
                 ? Colors.red[300]
                 : Colors.redAccent;
-            messages.removeWhere((msg) => msg.id.toString() == tempId);
+            messages.removeWhere(
+              (msg) => msg.id.toString() == tempId.replaceAll('temp_', ''),
+            );
             _pendingMessages.remove(tempId);
             _sendMessageRetryCount = 0;
           });
@@ -482,7 +520,10 @@ class _ConversationScreenState extends State<ConversationScreen>
             _errorMessageColor = isDarkMode
                 ? Colors.red[300]
                 : Colors.redAccent;
-            messages.removeWhere((msg) => msg.id.toString() == tempId);
+            messages.removeWhere(
+              (msg) => msg.id.toString() == tempId.replaceAll('temp_', ''),
+            );
+            messages.add(pendingMessage.copyWith(status: MessageStatus.reject));
             _pendingMessages.remove(tempId);
             _sendMessageRetryCount = 0;
           });
@@ -530,12 +571,37 @@ class _ConversationScreenState extends State<ConversationScreen>
       return;
     }
 
+    final tempId = 'temp_${DateTime.now().millisecondsSinceEpoch}';
+    final pendingMessage = Message(
+      id: int.parse(tempId.replaceAll('temp_', '')),
+      content: '🔈 پیغام صوتی',
+      isVoice: true,
+      voiceUrl: null,
+      duration: _recordingDuration,
+      isOutgoing: true,
+      date: DateTime.now(),
+      waveformData: _waveformData,
+      status: MessageStatus.pending,
+    );
+
     try {
       setState(() {
         errorMessage = 'در حال ارسال پیام صوتی...';
         _errorMessageColor = isDarkMode
             ? Colors.yellow[300]
             : Colors.yellowAccent;
+        _pendingMessages[tempId] = pendingMessage;
+        messages.add(pendingMessage);
+        messages.sort((a, b) => a.date.compareTo(b.date));
+      });
+      Future.delayed(const Duration(milliseconds: 100), () {
+        if (_scrollController.hasClients && mounted) {
+          _scrollController.animateTo(
+            _scrollController.position.maxScrollExtent,
+            duration: const Duration(milliseconds: 300),
+            curve: Curves.easeOut,
+          );
+        }
       });
 
       final file = File(_recordedFilePath!);
@@ -546,6 +612,10 @@ class _ConversationScreenState extends State<ConversationScreen>
             _errorMessageColor = isDarkMode
                 ? Colors.red[300]
                 : Colors.redAccent;
+            messages.removeWhere(
+              (msg) => msg.id.toString() == tempId.replaceAll('temp_', ''),
+            );
+            _pendingMessages.remove(tempId);
           });
         }
         return;
@@ -574,7 +644,6 @@ class _ConversationScreenState extends State<ConversationScreen>
       if (response.statusCode == 200) {
         final data = jsonDecode(responseBody);
         print('Send voice response data: $data');
-        // Treat as success unless it's a critical error
         if (data['status'] == 'error' &&
             data['message'] != 'No valid message event received') {
           if (mounted) {
@@ -584,6 +653,13 @@ class _ConversationScreenState extends State<ConversationScreen>
               _errorMessageColor = isDarkMode
                   ? Colors.red[300]
                   : Colors.redAccent;
+              messages.removeWhere(
+                (msg) => msg.id.toString() == tempId.replaceAll('temp_', ''),
+              );
+              messages.add(
+                pendingMessage.copyWith(status: MessageStatus.reject),
+              );
+              _pendingMessages.remove(tempId);
               _sendVoiceRetryCount = 0;
             });
           }
@@ -596,9 +672,26 @@ class _ConversationScreenState extends State<ConversationScreen>
               _recordingDuration = null;
               _waveformData = null;
               _isWaveformLoading = false;
+              messages.removeWhere(
+                (msg) => msg.id.toString() == tempId.replaceAll('temp_', ''),
+              );
+              _pendingMessages.remove(tempId);
+              final newMessage = Message.fromJson(
+                data,
+              ).copyWith(status: MessageStatus.success);
+              messages.add(newMessage);
+              messages.sort((a, b) => a.date.compareTo(b.date));
               _sendVoiceRetryCount = 0;
             });
-            await _fetchMessages();
+            Future.delayed(const Duration(milliseconds: 100), () {
+              if (_scrollController.hasClients && mounted) {
+                _scrollController.animateTo(
+                  _scrollController.position.maxScrollExtent,
+                  duration: const Duration(milliseconds: 300),
+                  curve: Curves.easeOut,
+                );
+              }
+            });
           }
           await file.delete();
         }
@@ -610,6 +703,10 @@ class _ConversationScreenState extends State<ConversationScreen>
             _errorMessageColor = isDarkMode
                 ? Colors.red[300]
                 : Colors.redAccent;
+            messages.removeWhere(
+              (msg) => msg.id.toString() == tempId.replaceAll('temp_', ''),
+            );
+            _pendingMessages.remove(tempId);
             _sendVoiceRetryCount = 0;
           });
         }
@@ -628,6 +725,11 @@ class _ConversationScreenState extends State<ConversationScreen>
             _errorMessageColor = isDarkMode
                 ? Colors.red[300]
                 : Colors.redAccent;
+            messages.removeWhere(
+              (msg) => msg.id.toString() == tempId.replaceAll('temp_', ''),
+            );
+            messages.add(pendingMessage.copyWith(status: MessageStatus.reject));
+            _pendingMessages.remove(tempId);
             _sendVoiceRetryCount = 0;
           });
         }
@@ -861,6 +963,7 @@ class _ConversationScreenState extends State<ConversationScreen>
     _messageController.dispose();
     _audioPlayer.dispose();
     _recorder.dispose();
+    _scrollController.removeListener(_scrollListener);
     _scrollController.dispose();
     _playerStateSubscription?.cancel();
     _positionSubscription?.cancel();
@@ -897,7 +1000,10 @@ class _ConversationScreenState extends State<ConversationScreen>
         actions: [
           IconButton(
             icon: const Icon(Icons.refresh, color: Colors.white),
-            onPressed: _fetchMessages,
+            onPressed: () {
+              oldestMessageId = null;
+              _fetchMessages();
+            },
           ),
           IconButton(
             icon: Icon(
@@ -976,11 +1082,20 @@ class _ConversationScreenState extends State<ConversationScreen>
                     ),
                     controller: _scrollController,
                     padding: const EdgeInsets.symmetric(vertical: 8.0),
-                    itemCount: messages.length,
+                    itemCount: messages.length + (isLoadingMore ? 1 : 0),
                     itemBuilder: (context, index) {
-                      final message = messages[index];
+                      if (isLoadingMore && index == 0) {
+                        return const Padding(
+                          padding: EdgeInsets.all(16.0),
+                          child: Center(
+                            child: CircularProgressIndicator(strokeWidth: 2.0),
+                          ),
+                        );
+                      }
+                      final messageIndex = isLoadingMore ? index - 1 : index;
+                      final message = messages[messageIndex];
                       print(
-                        'Rendering message: id=${message.id}, content=${message.content}, isOutgoing=${message.isOutgoing}',
+                        'Rendering message: id=${message.id}, content=${message.content}, isOutgoing=${message.isOutgoing}, status=${message.status}',
                       );
                       return Padding(
                         padding: const EdgeInsets.symmetric(
@@ -1021,134 +1136,167 @@ class _ConversationScreenState extends State<ConversationScreen>
                                     ),
                                   ],
                                 ),
-                                child: message.isVoice
-                                    ? Row(
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          IconButton(
-                                            icon: Icon(
-                                              _isPlaying &&
-                                                      _currentPlayingUrl ==
-                                                          message.voiceUrl
-                                                  ? Icons.pause
-                                                  : Icons.play_arrow,
-                                              color: isDarkMode
-                                                  ? Colors.white
-                                                  : Colors.black87,
-                                              size: 28,
-                                            ),
-                                            onPressed:
-                                                _isAudioLoading &&
-                                                    _currentPlayingUrl ==
-                                                        message.voiceUrl
-                                                ? null
-                                                : () {
-                                                    if (_isPlaying &&
-                                                        _currentPlayingUrl ==
-                                                            message.voiceUrl) {
-                                                      _stopAudio();
-                                                    } else if (message
-                                                            .voiceUrl !=
-                                                        null) {
-                                                      _playVoice(
-                                                        message.voiceUrl,
-                                                      );
-                                                    } else {
-                                                      setState(() {
-                                                        errorMessage =
-                                                            'پیام صوتی در دسترس نیست';
-                                                        _errorMessageColor =
-                                                            isDarkMode
-                                                            ? Colors.red[300]
-                                                            : Colors.redAccent;
-                                                      });
-                                                    }
-                                                  },
-                                          ),
-                                          const SizedBox(width: 8),
-                                          Column(
-                                            crossAxisAlignment:
-                                                CrossAxisAlignment.start,
-                                            children: [
-                                              Text(
-                                                '${message.duration ?? 0} ثانیه',
-                                                style: TextStyle(
-                                                  fontFamily: 'Courier',
-                                                  fontSize: 12,
-                                                  color: textColor,
-                                                ),
-                                              ),
-                                              if (_isWaveformLoading &&
-                                                  message.isOutgoing &&
-                                                  message.voiceUrl == null)
-                                                const SizedBox(
-                                                  width: 150,
-                                                  height: 20,
-                                                  child:
-                                                      LinearProgressIndicator(),
-                                                ),
-                                              if (message.waveformData !=
-                                                      null &&
-                                                  (!_isWaveformLoading ||
-                                                      message.voiceUrl != null))
-                                                SizedBox(
-                                                  height: 24,
-                                                  width: 150,
-                                                  child: AnimatedBuilder(
-                                                    animation:
-                                                        _waveformAnimation,
-                                                    builder: (context, _) {
-                                                      return CustomPaint(
-                                                        painter: WaveformPainter(
-                                                          data: message
-                                                              .waveformData!,
-                                                          isPlaying:
-                                                              _isPlaying &&
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  crossAxisAlignment: CrossAxisAlignment.end,
+                                  children: [
+                                    Flexible(
+                                      child: message.isVoice
+                                          ? Row(
+                                              mainAxisSize: MainAxisSize.min,
+                                              children: [
+                                                IconButton(
+                                                  icon: Icon(
+                                                    _isPlaying &&
+                                                            _currentPlayingUrl ==
+                                                                message.voiceUrl
+                                                        ? Icons.pause
+                                                        : Icons.play_arrow,
+                                                    color: isDarkMode
+                                                        ? Colors.white
+                                                        : Colors.black87,
+                                                    size: 28,
+                                                  ),
+                                                  onPressed:
+                                                      _isAudioLoading &&
+                                                          _currentPlayingUrl ==
+                                                              message.voiceUrl
+                                                      ? null
+                                                      : () {
+                                                          if (_isPlaying &&
                                                               _currentPlayingUrl ==
                                                                   message
-                                                                      .voiceUrl,
-                                                          progress:
-                                                              _audioDuration
-                                                                      .inMilliseconds >
-                                                                  0
-                                                              ? _audioPosition
-                                                                        .inMilliseconds /
+                                                                      .voiceUrl) {
+                                                            _stopAudio();
+                                                          } else if (message
+                                                                  .voiceUrl !=
+                                                              null) {
+                                                            _playVoice(
+                                                              message.voiceUrl,
+                                                            );
+                                                          } else {
+                                                            setState(() {
+                                                              errorMessage =
+                                                                  'پیام صوتی در دسترس نیست';
+                                                              _errorMessageColor =
+                                                                  isDarkMode
+                                                                  ? Colors
+                                                                        .red[300]
+                                                                  : Colors
+                                                                        .redAccent;
+                                                            });
+                                                          }
+                                                        },
+                                                ),
+                                                const SizedBox(width: 8),
+                                                Column(
+                                                  crossAxisAlignment:
+                                                      CrossAxisAlignment.start,
+                                                  children: [
+                                                    Text(
+                                                      '${message.duration ?? 0} ثانیه',
+                                                      style: TextStyle(
+                                                        fontFamily: 'Courier',
+                                                        fontSize: 12,
+                                                        color: textColor,
+                                                      ),
+                                                    ),
+                                                    if (_isWaveformLoading &&
+                                                        message.isOutgoing &&
+                                                        message.voiceUrl ==
+                                                            null)
+                                                      const SizedBox(
+                                                        width: 150,
+                                                        height: 20,
+                                                        child:
+                                                            LinearProgressIndicator(),
+                                                      ),
+                                                    if (message.waveformData !=
+                                                            null &&
+                                                        (!_isWaveformLoading ||
+                                                            message.voiceUrl !=
+                                                                null))
+                                                      SizedBox(
+                                                        height: 24,
+                                                        width: 150,
+                                                        child: AnimatedBuilder(
+                                                          animation:
+                                                              _waveformAnimation,
+                                                          builder: (context, _) {
+                                                            return CustomPaint(
+                                                              painter: WaveformPainter(
+                                                                data: message
+                                                                    .waveformData!,
+                                                                isPlaying:
+                                                                    _isPlaying &&
+                                                                    _currentPlayingUrl ==
+                                                                        message
+                                                                            .voiceUrl,
+                                                                progress:
                                                                     _audioDuration
-                                                                        .inMilliseconds
-                                                              : 0.0,
-                                                          isDarkMode:
-                                                              isDarkMode,
-                                                          animationValue:
-                                                              _waveformAnimation
-                                                                  .value,
+                                                                            .inMilliseconds >
+                                                                        0
+                                                                    ? _audioPosition
+                                                                              .inMilliseconds /
+                                                                          _audioDuration
+                                                                              .inMilliseconds
+                                                                    : 0.0,
+                                                                isDarkMode:
+                                                                    isDarkMode,
+                                                                animationValue:
+                                                                    _waveformAnimation
+                                                                        .value,
+                                                              ),
+                                                            );
+                                                          },
                                                         ),
-                                                      );
-                                                    },
-                                                  ),
+                                                      ),
+                                                    if (_isPlaying &&
+                                                        _currentPlayingUrl ==
+                                                            message.voiceUrl)
+                                                      Text(
+                                                        '${_audioPosition.inSeconds} / ${_audioDuration.inSeconds} ثانیه',
+                                                        style: TextStyle(
+                                                          fontFamily: 'Courier',
+                                                          fontSize: 10,
+                                                          color: textColor,
+                                                        ),
+                                                      ),
+                                                  ],
                                                 ),
-                                              if (_isPlaying &&
-                                                  _currentPlayingUrl ==
-                                                      message.voiceUrl)
-                                                Text(
-                                                  '${_audioPosition.inSeconds} / ${_audioDuration.inSeconds} ثانیه',
-                                                  style: TextStyle(
-                                                    fontFamily: 'Courier',
-                                                    fontSize: 10,
-                                                    color: textColor,
-                                                  ),
-                                                ),
-                                            ],
-                                          ),
-                                        ],
-                                      )
-                                    : Text(
-                                        message.content ?? '',
-                                        style: TextStyle(
-                                          fontFamily: 'Courier',
-                                          fontSize: 16,
-                                          color: textColor,
-                                        ),
+                                              ],
+                                            )
+                                          : Text(
+                                              message.content ?? '',
+                                              style: TextStyle(
+                                                fontFamily: 'Courier',
+                                                fontSize: 16,
+                                                color: textColor,
+                                              ),
+                                            ),
+                                    ),
+                                    if (message.isOutgoing) ...[
+                                      const SizedBox(width: 8),
+                                      Icon(
+                                        message.status == MessageStatus.pending
+                                            ? Icons.access_time
+                                            : message.status ==
+                                                  MessageStatus.success
+                                            ? Icons.check_circle
+                                            : Icons.error_outline,
+                                        size: 16,
+                                        color:
+                                            message.status ==
+                                                MessageStatus.pending
+                                            ? Colors.grey
+                                            : message.status ==
+                                                  MessageStatus.success
+                                            ? Colors.blue
+                                            : Colors.red,
                                       ),
+                                    ],
+                                  ],
+                                ),
                               ),
                               const SizedBox(height: 4),
                               Text(

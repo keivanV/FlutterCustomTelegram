@@ -8,7 +8,6 @@ import time
 import urllib.parse
 import base64
 from pydub import AudioSegment
-
 from ctypes import CDLL, CFUNCTYPE, c_char_p, c_double, c_int
 from ctypes.util import find_library
 from typing import Any, Dict, Optional, List
@@ -147,7 +146,7 @@ class TdExample:
         """Destroy the TDLib client."""
         self.send({"@type": "close"})
         logger.info(f"Destroying client with ID: {self.client_id}")
-        for _ in range(10):  # Increased attempts for robust cleanup
+        for _ in range(10):
             result = self._td_receive(2.0)
             if result:
                 event = json.loads(result.decode("utf-8"))
@@ -574,187 +573,151 @@ class TdExample:
 
     async def get_messages(self, chat_id: int, limit: int = 50, from_message_id: int = 0, phone_number: str = None) -> List[Dict]:
         """Retrieve messages from a specific chat."""
-        logger.info(f"Fetching messages for chat_id: {chat_id}, limit: {limit}, from_message_id: {from_message_id}")
-        messages = []
-        file_ids = []
-        seen_message_ids = set()
-        max_retries = 3
-        total_fetched = 0
-        current_from_message_id = from_message_id
+        logger.info(f"Fetching messages for chat_id={chat_id}, limit={limit}, from_message_id={from_message_id}")
 
-        while total_fetched < limit:
-            for attempt in range(max_retries):
-                logger.info(f"Attempt {attempt + 1} to fetch messages for chat_id: {chat_id} with from_message_id: {current_from_message_id}")
-                self.send({
-                    "@type": "getChatHistory",
-                    "chat_id": chat_id,
-                    "limit": min(limit - total_fetched, 100),  # Telegram API max limit is 100
-                    "from_message_id": current_from_message_id,
-                    "offset": 0,
-                    "only_local": False,
-                })
-                batch_messages = []
-                batch_file_ids = []
-                async for event in self._receive_events(timeout=20.0):
-                    if event["@type"] == "messages":
-                        logger.info(f"Raw messages event: {event}")
-                        for msg in event.get("messages", []):
-                            if msg["id"] not in seen_message_ids:
-                                seen_message_ids.add(msg["id"])
-                                if msg["content"]["@type"] == "messageText":
-                                    batch_messages.append({
-                                        "id": msg["id"],
-                                        "content": msg["content"]["text"]["text"],
-                                        "isVoice": False,
-                                        "voiceUrl": None,
-                                        "duration": 0,
-                                        "is_outgoing": msg["is_outgoing"],
-                                        "date": msg["date"],
-                                    })
-                                elif msg["content"]["@type"] == "messageVoiceNote":
-                                    voice_file_id = msg["content"]["voice_note"]["voice"]["id"]
-                                    waveform = msg["content"]["voice_note"].get("waveform", "")
-                                    duration = msg["content"]["voice_note"].get("duration", 0)
-                                    batch_file_ids.append((voice_file_id, "voice"))
-                                    waveform_data = []
-                                    if isinstance(waveform, str) and waveform:
-                                        try:
-                                            waveform_data = [b / 255.0 for b in base64.b64decode(waveform)]
-                                            logger.info(f"Decoded waveform for message {msg['id']}: {waveform_data[:10]}...")
-                                        except Exception as e:
-                                            logger.error(f"Failed to decode waveform for message {msg['id']}: {e}")
-                                            waveform_data = [0.1] * 60
-                                    else:
-                                        logger.warning(f"No waveform data for message {msg['id']}, using default")
-                                        waveform_data = [0.1] * 60
-                                    batch_messages.append({
-                                        "id": msg["id"],
-                                        "content": "🔈 پیغام صوتی",
-                                        "isVoice": True,
-                                        "voiceUrl": None,
-                                        "duration": duration,
-                                        "is_outgoing": msg["is_outgoing"],
-                                        "date": msg["date"],
-                                        "voice_file_id": voice_file_id,
-                                        "waveformData": waveform_data,
-                                    })
-                        logger.info(f"Received {len(batch_messages)} new messages on attempt {attempt + 1}")
-                        break
-                    elif event["@type"] == "error":
-                        logger.error(f"TDLib error in get_messages: {event}")
-                        break
-                if batch_messages or event.get("@type") == "error":
-                    messages.extend(batch_messages)
-                    file_ids.extend(batch_file_ids)
-                    total_fetched += len(batch_messages)
-                    logger.info(f"Total messages fetched so far: {total_fetched}")
-                    if batch_messages:
-                        current_from_message_id = min([msg["id"] for msg in batch_messages])
-                    break
-                logger.warning(f"No messages received on attempt {attempt + 1}, retrying")
-                await asyncio.sleep(1.0)
-            if not batch_messages or total_fetched >= limit:
+        # Verify chat existence
+        self.send({"@type": "getChat", "chat_id": chat_id})
+        chat_exists = False
+        async for event in self._receive_events(timeout=5.0):
+            if event["@type"] == "chat" and event["id"] == chat_id:
+                chat_exists = True
+                logger.info(f"Chat {chat_id} exists: {event['title']}")
                 break
-            logger.info(f"Fetching more messages with from_message_id: {current_from_message_id}")
+            elif event["@type"] == "error":
+                logger.error(f"Error verifying chat {chat_id}: {event}")
+                return []
 
-        if not messages and attempt == max_retries - 1:
-            logger.error(f"Failed to fetch messages for chat_id: {chat_id} after {max_retries} attempts")
+        if not chat_exists:
+            logger.error(f"Chat {chat_id} does not exist or is inaccessible")
+            return []
 
-        if phone_number:
-            file_urls = await self._batch_download_files(file_ids, phone_number)
-        else:
-            file_urls = {}
+        # Fetch message history
+        self.send({
+            "@type": "getChatHistory",
+            "chat_id": chat_id,
+            "limit": limit,
+            "from_message_id": from_message_id,
+            "offset": 0,
+            "only_local": False
+        })
 
-        for msg in messages:
-            if msg["isVoice"]:
-                voice_file_id = msg["voice_file_id"]
-                voice_url = file_urls.get(voice_file_id) if voice_file_id else None
-                msg["voiceUrl"] = voice_url
-                logger.info(f"Message {msg['id']} waveformData: {msg['waveformData'][:10]}...")
-                del msg["voice_file_id"]
+        messages = []
+        file_ids_to_download = []
+        seen_message_ids = set()
+        async for event in self._receive_events(timeout=20.0):
+            if event["@type"] == "messages":
+                logger.info(f"Received messages event with {len(event.get('messages', []))} messages")
+                for msg in event.get("messages", []):
+                    message_id = msg["id"]
+                    if message_id in seen_message_ids:
+                        logger.debug(f"Skipping duplicate message ID: {message_id}")
+                        continue
+                    seen_message_ids.add(message_id)
 
-        logger.info(f"Returning {len(messages)} messages for chat_id: {chat_id}")
+                    content = msg.get("content", {})
+                    content_type = content.get("@type")
+                    text = None
+                    voice = None
+                    duration = 0
+                    waveform_data = None
+                    status = "success" if message_id in self.sent_message_ids else "success"
+
+                    if content_type == "messageText":
+                        text = content.get("text", {}).get("text", "")
+                    elif content_type == "messageVoiceNote":
+                        voice = content.get("voice_note", {})
+                        if voice.get("voice", {}).get("id"):
+                            file_ids_to_download.append((voice["voice"]["id"], "voice"))
+                        duration = voice.get("duration", 0)
+                        waveform = voice.get("waveform", "")
+                        if waveform:
+                            try:
+                                waveform_data = [b / 31.0 for b in base64.b64decode(waveform)]
+                            except Exception as e:
+                                logger.error(f"Failed to decode waveform for message {message_id}: {e}")
+                                waveform_data = [0.1] * 60
+                        else:
+                            waveform_data = [0.1] * 60
+                        text = "🔈 پیغام صوتی"
+
+                    if text:
+                        messages.append({
+                            "id": message_id,
+                            "chat_id": chat_id,
+                            "content": text,
+                            "is_voice": content_type == "messageVoiceNote",
+                            "voice_url": None,
+                            "duration": duration,
+                            "is_outgoing": msg.get("is_outgoing", False),  # Ensure boolean
+                            "date": msg.get("date", 0),
+                            "waveform_data": waveform_data,
+                            "status": status
+                        })
+            elif event["@type"] == "error":
+                logger.error(f"TDLib error in get_messages: {event}")
+                return messages
+
+        # Download voice files if necessary
+        if file_ids_to_download and phone_number:
+            file_urls = await self._batch_download_files(file_ids_to_download, phone_number)
+            for msg in messages:
+                if msg["is_voice"] and not msg["voice_url"]:
+                    voice_id = next((fid for fid, ftype in file_ids_to_download if ftype == "voice"), None)
+                    if voice_id and file_urls.get(voice_id):
+                        msg["voice_url"] = file_urls[voice_id]
+
+        messages.sort(key=lambda x: x["date"])
+        logger.info(f"Returning {len(messages)} messages for chat_id={chat_id}")
         return messages
 
-    async def send_message(self, chat_id: int, text: str) -> Dict[str, Any]:
+    async def send_message(self, chat_id: int, text: str) -> Dict:
         """Send a text message to a specific chat."""
+        logger.info(f"Sending message to chat_id={chat_id}, text={text}")
+        message_id = None
         self.send({
             "@type": "sendMessage",
             "chat_id": chat_id,
             "input_message_content": {
                 "@type": "inputMessageText",
-                "text": {"@type": "formattedText", "text": text},
-            },
+                "text": {"@type": "formattedText", "text": text}
+            }
         })
-        message_id = None
+
         async for event in self._receive_events(timeout=20.0):
-            if event["@type"] == "message" and event["chat_id"] == chat_id:
-                if message_id is None and event["id"] not in self.sent_message_ids:
+            if event["@type"] == "message":
+                if event["chat_id"] == chat_id and event.get("content", {}).get("text", {}).get("text") == text:
                     message_id = event["id"]
                     self.sent_message_ids.add(message_id)
                     return {
-                        "id": event["id"],
-                        "content": event["content"]["text"]["text"],
-                        "isVoice": False,
-                        "voiceUrl": None,
+                        "id": message_id,
+                        "chat_id": chat_id,
+                        "content": text,
+                        "is_voice": False,
+                        "voice_url": None,
                         "duration": 0,
-                        "is_outgoing": event["is_outgoing"],
-                        "date": event["date"],
+                        "is_outgoing": True,
+                        "date": event.get("date", int(time.time())),
+                        "waveform_data": None,
+                        "status": "success"
                     }
-                else:
-                    logger.info(f"Ignoring duplicate message event for message_id: {event['id']}")
             elif event["@type"] == "error":
                 logger.error(f"TDLib error in send_message: {event}")
-                return {"status": "error", "message": f"TDLib error: {event['message']}"}
-        logger.error("Failed to send message: No valid message event received")
-        return {"status": "error", "message": "Failed to send message"}
+                return {"status": "error", "message": event["message"]}
+        logger.warning("No message event received for send_message")
+        return {"status": "error", "message": "No valid message event received"}
 
-    async def send_voice_message(self, chat_id: int, voice_path: str, duration: int, phone_number: str) -> Dict[str, Any]:
+    async def send_voice_message(self, chat_id: int, voice_path: str, duration: int, phone_number: str) -> Dict:
         """Send a voice message to a specific chat."""
+        logger.info(f"Sending voice message to chat_id={chat_id}, voice_path={voice_path}, duration={duration}")
+        if not os.path.exists(voice_path):
+            logger.error(f"Voice file not found: {voice_path}")
+            return {"status": "error", "message": "Voice file not found"}
+
         try:
-            if not os.path.exists(voice_path):
-                logger.error(f"File does not exist: {voice_path}")
-                return {"status": "error", "message": f"File not found: {voice_path}"}
-
-            with open(voice_path, 'rb') as f:
-                header = f.read(4)
-                logger.info(f"File header: {header.hex()}")
-                if header != b'RIFF':
-                    logger.error("File is not WAV")
-                    return {"status": "error", "message": "File must be WAV"}
-
-            session = hashlib.md5(phone_number.encode()).hexdigest()
-            voice_dir = os.path.join(self.session_path, "voice")
-            os.makedirs(voice_dir, exist_ok=True)
-
-            trimmed_wav_path = voice_path.replace(".wav", "_trimmed.wav")
-            try:
-                audio = AudioSegment.from_file(voice_path, format="wav")
-                audio = audio[100:]
-                audio = audio.set_channels(1).set_sample_width(2).set_frame_rate(16000)
-                audio.export(trimmed_wav_path, format="wav")
-                logger.info(f"Trimmed {voice_path} to {trimmed_wav_path}")
-            except Exception as e:
-                logger.error(f"Failed to trim WAV file: {e}")
-                return {"status": "error", "message": f"Failed to trim WAV file: {str(e)}"}
-
-            oga_path = trimmed_wav_path.replace(".wav", ".oga")
-            try:
-                convert_oga_to_wav(trimmed_wav_path, oga_path, reverse=True)
-                logger.info(f"Converted {trimmed_wav_path} to {oga_path}")
-            except Exception as e:
-                logger.error(f"Failed to convert WAV to OGG: {e}")
-                return {"status": "error", "message": f"Failed to convert WAV to OGG: {str(e)}"}
-
-            waveform = generate_waveform(trimmed_wav_path)
-            if not waveform:
-                logger.warning(f"Waveform generation failed for {trimmed_wav_path}, using default")
-                waveform = [0.1] * 60
-            logger.info(f"Generated waveform for {trimmed_wav_path}: {waveform[:10]}...")
-
-            waveform_encoded = base64.b64encode(
-                bytes([int(x * 31) for x in waveform])
-            ).decode('utf-8')
+            audio = AudioSegment.from_file(voice_path)
+            waveform_data = generate_waveform(voice_path)
+            waveform_data = [x * 31 for x in waveform_data]
+            waveform_b64 = base64.b64encode(bytes([int(x) for x in waveform_data])).decode("utf-8")
 
             self.send({
                 "@type": "sendMessage",
@@ -763,101 +726,37 @@ class TdExample:
                     "@type": "inputMessageVoiceNote",
                     "voice_note": {
                         "@type": "inputFileLocal",
-                        "path": oga_path
+                        "path": voice_path
                     },
-                    "duration": max(0, duration - 1),
-                    "waveform": waveform_encoded
+                    "duration": duration,
+                    "waveform": waveform_b64
                 }
             })
 
             message_id = None
-            file_id = None
-            file_uploaded = False
-            timeout = 30.0
-            end_time = asyncio.get_event_loop().time() + timeout
-
-            async for event in self._receive_events(timeout=timeout):
-                logger.info(f"Processing event: {event['@type']}")
-                if event["@type"] == "message" and event["chat_id"] == chat_id:
-                    if message_id is None and event["id"] not in self.sent_message_ids:
-                        message_id = event["id"]
-                        self.sent_message_ids.add(message_id)
-                        if event["content"]["@type"] != "messageVoiceNote":
-                            logger.error(f"Unexpected content type: {event['content']['@type']}")
-                            return {"status": "error", "message": f"Unexpected content type: {event['content']['@type']}"}
-                        voice_note = event["content"]["voice_note"]
-                        file_id = voice_note["voice"]["id"]
-                        event_waveform = voice_note.get("waveform", "")
-                        event_waveform_data = []
-                        if isinstance(event_waveform, str) and event_waveform:
-                            try:
-                                event_waveform_data = [b / 31.0 for b in base64.b64decode(event_waveform)]
-                                logger.info(f"TDLib returned waveform for message {message_id}: {event_waveform_data[:10]}...")
-                            except Exception as e:
-                                logger.error(f"Failed to decode TDLib waveform for message {message_id}: {e}")
-                                event_waveform_data = waveform
-                        else:
-                            logger.warning(f"No waveform returned by TDLib for message {message_id}, using generated")
-                            event_waveform_data = waveform
-                        logger.info(f"Message sent with ID: {message_id}, file_id: {file_id}")
-                elif event["@type"] == "updateFile" and file_id and event["file"]["id"] == file_id:
-                    local = event["file"].get("local", {})
-                    if local.get("is_downloading_completed", False):
-                        file_uploaded = True
-                        logger.info(f"File upload completed for file_id: {file_id}")
-                        break
-                    elif local.get("is_downloading_active", False):
-                        logger.info(f"File_id: {file_id} is still uploading")
-                elif event["@type"] == "error":
-                    logger.error(f"TDLib error in send_voice_message: {event}")
-                    return {"status": "error", "message": f"TDLib error: {event['message']}"}
-
-            if message_id is None:
-                logger.error("Failed to send voice message: No valid message event received")
-                return {"status": "error", "message": "Failed to send voice message"}
-
-            if file_id and file_uploaded:
-                file_url = await self.download_file(file_id, phone_number, file_type="voice", retries=5, timeout=20.0)
-                if not file_url:
-                    logger.error(f"Failed to get file URL for file_id: {file_id}")
+            async for event in self._receive_events(timeout=20.0):
+                if event["@type"] == "message" and event["chat_id"] == chat_id and event.get("content", {}).get("@type") == "messageVoiceNote":
+                    message_id = event["id"]
+                    voice_id = event["content"]["voice_note"]["voice"]["id"]
+                    self.sent_message_ids.add(message_id)
+                    voice_url = await self.download_file(voice_id, phone_number, "voice")
                     return {
                         "id": message_id,
-                        "content": "[Voice Message Pending]",
-                        "isVoice": True,
-                        "voiceUrl": "",
-                        "duration": max(0, duration - 1),
+                        "chat_id": chat_id,
+                        "content": "🔈 پیغام صوتی",
+                        "is_voice": True,
+                        "voice_url": voice_url,
+                        "duration": duration,
                         "is_outgoing": True,
-                        "date": int(time.time()),
-                        "waveformData": waveform
+                        "date": event.get("date", int(time.time())),
+                        "waveform_data": waveform_data,
+                        "status": "success"
                     }
-
-                self.file_url_cache[file_id] = file_url
-
-                response = {
-                    "id": message_id,
-                    "content": "🔈 پیغام صوتی",
-                    "isVoice": True,
-                    "voiceUrl": file_url,
-                    "duration": max(0, duration - 1),
-                    "is_outgoing": True,
-                    "date": int(time.time()),
-                    "waveformData": event_waveform_data
-                }
-                logger.info(f"Generated response for message {message_id}: {response}")
-                return response
-            else:
-                logger.error("File upload not completed or file_id not received")
-                return {
-                    "id": message_id,
-                    "content": "[Voice Message Pending]",
-                    "isVoice": True,
-                    "voiceUrl": "",
-                    "duration": max(0, duration - 1),
-                    "is_outgoing": True,
-                    "date": int(time.time()),
-                    "waveformData": waveform
-                }
-
+                elif event["@type"] == "error":
+                    logger.error(f"TDLib error in send_voice_message: {event}")
+                    return {"status": "error", "message": event["message"]}
+            logger.warning("No message event received for send_voice_message")
+            return {"status": "error", "message": "No valid message event received"}
         except Exception as e:
-            logger.error(f"Error in send_voice_message: {str(e)}")
-            return {"status": "error", "message": f"Failed to send voice message: {str(e)}"}
+            logger.error(f"Error processing voice message: {e}")
+            return {"status": "error", "message": str(e)}
